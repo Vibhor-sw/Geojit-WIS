@@ -1,0 +1,16 @@
+{
+  "name": "wis-module4-portfolio-construction",
+  "version": "1.0.0",
+  "description": "Geojit WIS - Module 4: Portfolio Construction & Financial Planning (M4-UC1 to M4-UC7 workable model prototypes)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "license": "UNLICENSED"
+}
