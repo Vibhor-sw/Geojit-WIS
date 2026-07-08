@@ -83,6 +83,7 @@
 
     const inputPanel = document.createElement('div');
     inputPanel.className = 'panel';
+    inputPanel.id = 'input-panel';
     inputPanel.innerHTML = `<div class="panel-title">Model Input (edit JSON, or load the bundled sample)</div>`;
     const textarea = document.createElement('textarea');
     textarea.className = 'json-input';
@@ -97,8 +98,14 @@
     const runBtn = document.createElement('button');
     runBtn.className = 'btn btn-accent';
     runBtn.textContent = 'Run Model';
+    const tourBtn = document.createElement('button');
+    tourBtn.className = 'btn btn-tour';
+    tourBtn.textContent = '🧭 Guided Requirement Walkthrough';
+    tourBtn.disabled = true;
+    tourBtn.title = 'Run the model first, then walk through each requirement FR-by-FR against what\'s shown on screen.';
     btnRow.appendChild(loadBtn);
     btnRow.appendChild(runBtn);
+    btnRow.appendChild(tourBtn);
     inputPanel.appendChild(btnRow);
 
     const status = document.createElement('div');
@@ -143,6 +150,7 @@
           status.textContent = `Model executed successfully in ${elapsed}ms (in-browser).`;
           status.className = 'status-line ok';
           uc.render(resultsWrap, result);
+          tourBtn.disabled = !(uc.tour && uc.tour.length);
         } catch (err) {
           status.textContent = 'Error: ' + err.message;
           status.className = 'status-line error';
@@ -154,6 +162,9 @@
 
     loadBtn.addEventListener('click', loadSample);
     runBtn.addEventListener('click', runModel);
+    tourBtn.addEventListener('click', () => {
+      window.WISCoachmark.start(uc.tour, { tag: `${uc.tag} Requirement Walkthrough` });
+    });
 
     // Auto-load sample on first open for convenience.
     loadSample();
