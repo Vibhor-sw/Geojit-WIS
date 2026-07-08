@@ -4,8 +4,15 @@
 // Reuses the M4-UC3 optimizer core per the spec's "component library" build note.
 
 const { UNIVERSE, BENCHMARK_WEIGHTS, EXCLUSION_LIST } = require('../data/sampleData');
-const { buildUniverse, buildCovariance, optimize, portfolioStats } = require('./uc3Optimizer');
+const { buildCovariance, optimize, portfolioStats } = require('./uc3Optimizer');
 const { shrinkCovariance } = require('./mathUtils');
+
+// UC6 keeps its own small illustrative universe (with ESG/carbon fields) independent of UC3's
+// universe, which was repointed to the client-supplied real-holdings dataset for UC1/UC3/UC4/UC5 --
+// that dataset has no ESG/carbon data, so UC6 is intentionally not wired to it.
+function buildUniverse(ids) {
+  return ids && ids.length ? UNIVERSE.filter((u) => ids.includes(u.id)) : UNIVERSE;
+}
 
 function runEsgOptimization(input) {
   const {

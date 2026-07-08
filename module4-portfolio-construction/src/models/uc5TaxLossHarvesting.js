@@ -2,11 +2,12 @@
 // FR-TL-01..06: loss-lot scan ranked by tax benefit, similarity-constrained replacement selection,
 // wash-sale compliance gate, tax-alpha computation, YTD tracking, minimum-trade-size respect.
 
-const { UNIVERSE, TAX_RULES } = require('../data/sampleData');
+const { TAX_RULES } = require('../data/sampleData');
+const { REAL_HOLDINGS } = require('../data/realPortfolioData');
 const { lotTaxRate } = require('./uc4Rebalancing');
 
 function findSecurity(id) {
-  return UNIVERSE.find((u) => u.id === id);
+  return REAL_HOLDINGS.find((u) => u.id === id);
 }
 
 function factorSimilarity(a, b) {
@@ -89,7 +90,10 @@ function runTaxLossHarvesting(input) {
 
     // Replacement candidate selection: highest similarity score among universe (excluding sold security itself
     // and anything substantially identical / within its own wash window).
-    const candidates = UNIVERSE.filter((u) => u.id !== lot.security && u.assetClass === (sold ? sold.assetClass : u.assetClass));
+    // Prefer a replacement of the same instrument type (stock<->stock, fund<->fund) and market-cap
+    // bucket where possible, falling back to the full universe if nothing else qualifies.
+    let candidates = REAL_HOLDINGS.filter((u) => u.id !== lot.security && sold && u.type === sold.type && u.macap === sold.macap);
+    if (!candidates.length) candidates = REAL_HOLDINGS.filter((u) => u.id !== lot.security);
     let best = null, bestScore = -Infinity;
     for (const c of candidates) {
       const sim = factorSimilarity(sold, c);

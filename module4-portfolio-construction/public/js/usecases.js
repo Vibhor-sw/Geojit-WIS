@@ -99,21 +99,24 @@
       ],
       renderPage(container, api) {
         const C = global.WISControls;
-        const SECURITIES = [
-          { id: 'RELIANCE', name: 'Reliance Industries', price: 2870 },
-          { id: 'TCS', name: 'Tata Consultancy Services', price: 3820 },
-          { id: 'HDFCBANK', name: 'HDFC Bank', price: 1590 },
-          { id: 'INFY', name: 'Infosys', price: 1690 },
-          { id: 'NIFTYBEES', name: 'Nifty 50 ETF', price: 268 },
-          { id: 'GOLDBEES', name: 'Gold ETF', price: 63 },
-          { id: 'LIQUIDBEES', name: 'Liquid / Debt Fund', price: 101.8 },
+        // Two kinds of allocation source, per the requirement: assets the client already owns
+        // (real holdings, tagged with what's owned) and instruments not currently held that could
+        // be purchased fresh to close a funding gap.
+        const OWNED_HOLDINGS = (global.WISRealHoldings || []).map((h) => ({
+          id: h.id, name: h.name, price: h.currentPrice, owned: true, ownedQty: h.qty, ownedValue: Math.round(h.qty * h.currentPrice),
+        }));
+        const NEW_PURCHASE_OPTIONS = [
+          { id: 'LIQUIDFUND', name: 'Liquid Fund', price: 100, owned: false },
+          { id: 'GOLDETF', name: 'Gold ETF', price: 63, owned: false },
+          { id: 'NIFTYINDEX', name: 'Nifty Index Fund', price: 210, owned: false },
         ];
+        const SECURITIES = [...OWNED_HOLDINGS, ...NEW_PURCHASE_OPTIONS];
         const ICONS = ['🎓', '🏖️', '🏠', '🚗', '✈️', '💍', '🎯', '👶', '🏥'];
 
         let goals = [
-          { id: 'g1', icon: '🎓', name: 'Child Education', targetAmount: 3000000, horizonYears: 12, inflation: 0.08, allocatedHoldings: [{ security: 'NIFTYBEES', amount: 400000 }], monthlySip: 8000, lumpSum: 0 },
-          { id: 'g2', icon: '🏖️', name: 'Retirement', targetAmount: 20000000, horizonYears: 25, inflation: 0.06, allocatedHoldings: [{ security: 'NIFTYBEES', amount: 1500000 }], monthlySip: 15000, lumpSum: 0 },
-          { id: 'g3', icon: '🏠', name: 'Home Down-payment', targetAmount: 2000000, horizonYears: 4, inflation: 0.06, allocatedHoldings: [{ security: 'LIQUIDBEES', amount: 300000 }], monthlySip: 20000, lumpSum: 100000 },
+          { id: 'g1', icon: '🎓', name: 'Child Education', targetAmount: 3000000, horizonYears: 12, inflation: 0.08, allocatedHoldings: [{ security: 'HDFC_MIDCAP', amount: 400000 }], monthlySip: 8000, lumpSum: 0 },
+          { id: 'g2', icon: '🏖️', name: 'Retirement', targetAmount: 20000000, horizonYears: 25, inflation: 0.06, allocatedHoldings: [{ security: 'HDFC_LARGECAP', amount: 1500000 }], monthlySip: 15000, lumpSum: 0 },
+          { id: 'g3', icon: '🏠', name: 'Home Down-payment', targetAmount: 2000000, horizonYears: 4, inflation: 0.06, allocatedHoldings: [{ security: 'LIQUIDFUND', amount: 300000 }], monthlySip: 20000, lumpSum: 100000 },
           { id: 'g4', icon: '🚗', name: 'My Dream Car', targetAmount: 250000, horizonYears: 6, inflation: 0.06, allocatedHoldings: [], monthlySip: 5000, lumpSum: 0 },
         ];
         let selectedGoalId = null;
@@ -199,10 +202,29 @@
 
         function openAllocateFundsModal(goal) {
           const body = el('div');
-          const secField = C.selectInput({ value: SECURITIES[0].id, options: SECURITIES.map((s) => ({ value: s.id, label: s.name })) });
-          body.appendChild(C.field('Security / Fund', secField));
+          const modeField = C.selectInput({
+            value: 'owned',
+            options: [{ value: 'owned', label: 'Allocate an asset I already own' }, { value: 'new', label: 'Purchase a new asset for this goal' }],
+          });
+          body.appendChild(C.field('Source', modeField));
+          const pickerWrap = el('div');
+          body.appendChild(pickerWrap);
           const amountField = C.numberInput({ value: 50000, step: 5000, prefix: '₹' });
-          body.appendChild(C.field('Amount to Allocate', amountField, 'Value of existing holdings you want to earmark toward this goal.'));
+          body.appendChild(C.field('Amount to Allocate', amountField, 'Value of existing holdings (or new purchase) you want to earmark toward this goal.'));
+
+          let secField;
+          function renderPicker() {
+            pickerWrap.innerHTML = '';
+            const list = modeField.getValue() === 'owned' ? OWNED_HOLDINGS : NEW_PURCHASE_OPTIONS;
+            secField = C.selectInput({
+              value: list[0].id,
+              options: list.map((s) => ({ value: s.id, label: s.owned ? `${s.name} — you own ${s.ownedQty} units (₹${fmtCompact(s.ownedValue)})` : `${s.name} (new purchase)` })),
+            });
+            pickerWrap.appendChild(C.field('Security / Fund', secField));
+          }
+          modeField.addEventListener('change', renderPicker);
+          renderPicker();
+
           C.showModal({
             icon: '📦', title: `Allocate Funds — ${goal.name}`, bodyEl: body,
             actions: [
@@ -552,7 +574,7 @@
           },
         };
       },
-      render(container, data) {
+      render(container, data, ctx) {
         container.innerHTML = '';
         const C = global.WISControls;
         const verdict = el('div', 'panel');
@@ -621,6 +643,78 @@
         ]));
         two.appendChild(p3);
         container.appendChild(two);
+
+        // ---- Portfolio concentration & liquidity recommendations, using the client's real holdings ----
+        const holdings = global.WISRealHoldings || [];
+        if (holdings.length) {
+          const totalValue = holdings.reduce((s, h) => s + h.qty * h.currentPrice, 0);
+          const byMacap = { Large: 0, Mid: 0, Small: 0 };
+          holdings.forEach((h) => { byMacap[h.macap] = (byMacap[h.macap] || 0) + h.qty * h.currentPrice; });
+          const liquidValue = 0; // no liquid/debt instrument present in the supplied holdings
+          const pct = (v) => totalValue ? v / totalValue : 0;
+
+          const annualWithdrawal = (ctx && ctx.payload && ctx.payload.annualWithdrawal) || 420000;
+          const emergencyBufferTarget = Math.round((annualWithdrawal / 12) * 6); // 6 months of planned spending
+
+          const p5 = el('div', 'panel');
+          p5.appendChild(panelTitle('Portfolio Concentration & Liquidity — Built for Long-Term Safety',
+            'Derived from your actual holdings (not the Monte Carlo engine itself): checks how concentrated the equity sleeve is by market-cap bucket, and whether there\'s a liquid buffer for shocks/medical emergencies separate from the long-term growth assets.'));
+
+          const flags = [];
+          if (liquidValue === 0) {
+            flags.push({ icon: '🚨', text: `0% of this portfolio is in a liquid/debt instrument. For medical-emergency-type shocks, recommend holding roughly ₹${fmtCompact(emergencyBufferTarget)} (~6 months of planned spending) in a liquid fund, separate from the growth assets below.` });
+          }
+          if (pct(byMacap.Small) > 0.30) {
+            flags.push({ icon: '⚠️', text: `Small-cap exposure is ${fmtPct(pct(byMacap.Small))} of the equity sleeve — high for a "safe, shock-resistant" long-term corpus. Consider trimming toward Large-cap for stability.` });
+          }
+          const bigPositions = holdings.filter((h) => (h.qty * h.currentPrice) / totalValue > 0.08);
+          bigPositions.forEach((h) => flags.push({ icon: '🔎', text: `${h.name} is ${fmtPct((h.qty * h.currentPrice) / totalValue)} of the portfolio — a concentrated single-name position; consider trimming to reduce single-stock risk.` }));
+          if (!flags.length) flags.push({ icon: '✅', text: 'No major concentration or liquidity flags — the current cap-bucket mix and position sizes look reasonable for a long-term plan.' });
+
+          flags.forEach((f) => {
+            const banner = el('div', 'alert-banner' + (f.icon === '✅' ? ' ok' : ''));
+            banner.innerHTML = `<span class="alert-icon">${f.icon}</span><span class="alert-text">${f.text}</span>`;
+            p5.appendChild(banner);
+          });
+
+          const two2 = el('div', 'two-col');
+          const capPanel = el('div', 'panel');
+          capPanel.appendChild(panelTitle('Current vs. Recommended Mix', 'Recommended mix tilts toward Large-cap for stability and carves out a liquid emergency buffer, per the flags above.'));
+          const capChart = el('div', 'chart-wrap');
+          capPanel.appendChild(capChart);
+          two2.appendChild(capPanel);
+          const recommended = { Large: 0.45, Mid: 0.35, Small: 0.15, Liquid: 0.05 };
+          barChart(capChart, [
+            { label: 'Large Cap (current)', value: pct(byMacap.Large) }, { label: 'Large Cap (target)', value: recommended.Large, color: '#94a3b3' },
+            { label: 'Mid Cap (current)', value: pct(byMacap.Mid) }, { label: 'Mid Cap (target)', value: recommended.Mid, color: '#94a3b3' },
+            { label: 'Small Cap (current)', value: pct(byMacap.Small) }, { label: 'Small Cap (target)', value: recommended.Small, color: '#94a3b3' },
+            { label: 'Liquid (current)', value: pct(liquidValue) }, { label: 'Liquid (target)', value: recommended.Liquid, color: '#94a3b3' },
+          ], { valueFormatter: fmtPct, max: 0.5 });
+
+          const actionPanel = el('div', 'panel');
+          actionPanel.appendChild(panelTitle('Specific Increase / Decrease Suggestions', 'Sell-flagged holdings are candidates to trim; Buy-flagged Large-cap holdings help rebuild the stability sleeve. This reads your Reco field directly — it is not re-derived by the simulation.'));
+          const actionRows = holdings
+            .map((h) => {
+              const w = (h.qty * h.currentPrice) / totalValue;
+              let action = null, rationale = '';
+              if (h.reco === 'Sell' && w > 0.01) { action = 'Decrease'; rationale = 'Flagged Sell by research; reduces concentration.'; }
+              else if (h.reco === 'Buy' && h.macap === 'Large') { action = 'Increase'; rationale = 'Flagged Buy; adds Large-cap stability.'; }
+              return action ? { name: h.name, macap: h.macap, weight: w, action, rationale } : null;
+            })
+            .filter(Boolean)
+            .sort((a, b) => b.weight - a.weight)
+            .slice(0, 8);
+          if (actionRows.length) {
+            actionPanel.appendChild(table(['Holding', 'Cap', 'Current Wt', 'Action', 'Rationale'], actionRows.map((r) => [
+              r.name, r.macap, fmtPct(r.weight), tag(r.action, r.action === 'Increase' ? 'buy' : 'sell'), r.rationale,
+            ])));
+          } else {
+            actionPanel.appendChild(el('div', 'empty-hint', 'No specific increase/decrease flags from the Reco data'));
+          }
+          two2.appendChild(actionPanel);
+          p5.appendChild(two2);
+          container.appendChild(p5);
+        }
       },
     },
 
@@ -653,16 +747,16 @@
       ],
       buildForm(container) {
         const C = global.WISControls;
-        const UNIVERSE_OPTIONS = [
-          ['RELIANCE', 'Reliance Industries'], ['TCS', 'Tata Consultancy Services'], ['HDFCBANK', 'HDFC Bank'], ['INFY', 'Infosys'],
-          ['ICICIBANK', 'ICICI Bank'], ['HINDUNILVR', 'Hindustan Unilever'], ['ITC', 'ITC Ltd'], ['LT', 'Larsen & Toubro'],
-          ['BHARTIARTL', 'Bharti Airtel'], ['SUNPHARMA', 'Sun Pharma'], ['NIFTYBEES', 'Nifty 50 ETF'], ['GOLDBEES', 'Gold ETF'], ['LIQUIDBEES', 'Liquid / Debt Fund'],
-        ];
+        const REAL = global.WISRealHoldings || [];
+        const UNIVERSE_OPTIONS = REAL.map((h) => [h.id, h.name]);
+        const totalValue = REAL.reduce((s, h) => s + h.qty * h.currentPrice, 0) || 1;
+        const defaultHoldings = {};
+        REAL.forEach((h) => { defaultHoldings[h.id] = Number(((h.qty * h.currentPrice) / totalValue).toFixed(4)); });
         let state = {
           objective: 'maxSharpe', riskFreeRate: 0.065, shrinkageIntensity: 0.3, useBlackLitterman: true,
-          views: [{ assetId: 'TCS', viewReturn: 0.16, confidence: 0.6 }],
-          sectorCaps: { IT: 0.30, Financials: 0.30 }, boxMax: 0.25, riskAversion: 3, turnoverCap: null,
-          currentHoldings: { RELIANCE: 0.12, TCS: 0.08, HDFCBANK: 0.15, NIFTYBEES: 0.20, GOLDBEES: 0.05, LIQUIDBEES: 0.10 },
+          views: [{ assetId: 'HDFCBANK', viewReturn: 0.16, confidence: 0.6 }],
+          sectorCaps: { 'Information Technology': 0.15, 'Financial Services': 0.30 }, boxMax: 0.15, riskAversion: 3, turnoverCap: null,
+          currentHoldings: defaultHoldings,
           transactionCostBps: 15,
         };
 
@@ -695,10 +789,10 @@
         const grid2 = el('div', 'form-grid');
         const boxField = C.sliderInput({ value: state.boxMax * 100, min: 5, max: 50, step: 5, format: (v) => v + '%', onChange: (v) => { state.boxMax = v / 100; } });
         grid2.appendChild(C.field('Max Weight per Security', boxField, 'No single holding can exceed this share of the portfolio.'));
-        const itCapField = C.sliderInput({ value: (state.sectorCaps.IT || 0) * 100, min: 0, max: 60, step: 5, format: (v) => v + '%', onChange: (v) => { state.sectorCaps.IT = v / 100; } });
-        grid2.appendChild(C.field('IT Sector Cap', itCapField, 'Maximum combined weight across all IT-sector holdings (TCS, Infosys).'));
-        const finCapField = C.sliderInput({ value: (state.sectorCaps.Financials || 0) * 100, min: 0, max: 60, step: 5, format: (v) => v + '%', onChange: (v) => { state.sectorCaps.Financials = v / 100; } });
-        grid2.appendChild(C.field('Financials Sector Cap', finCapField, 'Maximum combined weight across all Financials-sector holdings (HDFC Bank, ICICI Bank).'));
+        const itCapField = C.sliderInput({ value: (state.sectorCaps['Information Technology'] || 0) * 100, min: 0, max: 60, step: 5, format: (v) => v + '%', onChange: (v) => { state.sectorCaps['Information Technology'] = v / 100; } });
+        grid2.appendChild(C.field('IT Sector Cap', itCapField, 'Maximum combined weight across all Information Technology holdings (Infosys, Wipro).'));
+        const finCapField = C.sliderInput({ value: (state.sectorCaps['Financial Services'] || 0) * 100, min: 0, max: 60, step: 5, format: (v) => v + '%', onChange: (v) => { state.sectorCaps['Financial Services'] = v / 100; } });
+        grid2.appendChild(C.field('Financial Services Sector Cap', finCapField, 'Maximum combined weight across all Financial Services holdings (HDFC Bank, REC, HDFC Life).'));
         const riskAvField = C.sliderInput({ value: state.riskAversion, min: 1, max: 10, step: 0.5, format: (v) => v.toFixed(1), onChange: (v) => { state.riskAversion = v; } });
         grid2.appendChild(C.field('Risk Aversion (λ)', riskAvField, 'Higher values penalise variance more heavily inside the "Max Sharpe" objective, pulling the solution toward lower-risk holdings.'));
         const costField = C.numberInput({ value: state.transactionCostBps, step: 1, suffix: 'bps', onChange: (v) => { state.transactionCostBps = v || 0; } });
@@ -727,8 +821,8 @@
             viewRetField.setValue(state.views[0].viewReturn * 100);
             viewConfField.setValue(state.views[0].confidence * 100);
             boxField.setValue(state.boxMax * 100);
-            itCapField.setValue((state.sectorCaps.IT || 0) * 100);
-            finCapField.setValue((state.sectorCaps.Financials || 0) * 100);
+            itCapField.setValue((state.sectorCaps['Information Technology'] || 0) * 100);
+            finCapField.setValue((state.sectorCaps['Financial Services'] || 0) * 100);
             riskAvField.setValue(state.riskAversion);
             costField.setValue(state.transactionCostBps);
             UNIVERSE_OPTIONS.forEach(([id]) => holdingFields[id].setValue(Math.round((state.currentHoldings[id] || 0) * 1000) / 10));

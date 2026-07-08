@@ -4,11 +4,11 @@
 // (numerically equivalent in spirit to a QP solve for this prototype's universe size) so the
 // output reflects a genuinely solved portfolio rather than a lookup table.
 
-const { UNIVERSE } = require('../data/sampleData');
+const { REAL_HOLDINGS } = require('../data/realPortfolioData');
 const { invert, shrinkCovariance, projectToSimplexBox, transpose, matMul, matVec } = require('./mathUtils');
 
 function buildUniverse(ids) {
-  const list = ids && ids.length ? UNIVERSE.filter((u) => ids.includes(u.id)) : UNIVERSE;
+  const list = ids && ids.length ? REAL_HOLDINGS.filter((u) => ids.includes(u.id)) : REAL_HOLDINGS;
   return list;
 }
 

@@ -1,13 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const { runTaxLossHarvesting } = require('../models/uc5TaxLossHarvesting');
-const { SAMPLE_LOTS } = require('../data/sampleData');
+const { REAL_HOLDINGS } = require('../data/realPortfolioData');
+
+const lots = REAL_HOLDINGS.map((h) => ({
+  id: h.isin, security: h.id, qty: h.qty, costBasis: h.costBasis, purchaseDate: h.purchaseDate, currentPrice: h.currentPrice,
+}));
 
 const SAMPLE_REQUEST = {
-  lots: SAMPLE_LOTS,
+  lots,
   realizedGainsYTD: { stcg: 15000, ltcg: 40000 },
   washSaleWindowDays: 30,
-  minHarvestableLoss: 1000,
+  minHarvestableLoss: 500,
   recentlyPurchased: [],
 };
 

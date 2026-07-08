@@ -158,6 +158,73 @@
     5: { name: 'Aggressive Growth', weights: { Equity: 0.72, Debt: 0.08, Gold: 0.05, Cash: 0.00, International: 0.15 } },
   };
 
+  // ============================== Real client-supplied portfolio (stocks + MFs) ==============================
+  // See src/data/realPortfolioData.js in the Node build for full provenance notes: "atp" (average
+  // trade price) from the source export is treated as cost basis; current price and purchase date
+  // are not in the source, so both are derived deterministically per ISIN (reproducible, not random).
+  function hashSeed(str) {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) { h = (h << 5) - h + str.charCodeAt(i); h |= 0; }
+    return Math.abs(h) || 1;
+  }
+  const RAW_HOLDINGS = [
+    { isin: 'INE009A01021', id: 'INFY', name: 'Infosys Ltd', sector: 'Information Technology', macap: 'Mid', type: 'STOCK', reco: 'Sell', atp: 1520.2, qty: 7 },
+    { isin: 'INE010B01027', id: 'ZYDUSLIFE', name: 'Zydus Life Sciences Ltd', sector: 'Healthcare', macap: 'Mid', type: 'STOCK', reco: 'Hold', atp: 905, qty: 10 },
+    { isin: 'INE019A01038', id: 'JSWSTEEL', name: 'JSW Steel Ltd', sector: 'Metals & Mining', macap: 'Mid', type: 'STOCK', reco: 'Sell', atp: 1239.8, qty: 8 },
+    { isin: 'INE020B01018', id: 'RECLTD', name: 'Rural Electrification Corporation Ltd', sector: 'Financial Services', macap: 'Mid', type: 'STOCK', reco: 'Hold', atp: 382.1, qty: 12 },
+    { isin: 'INE021A01026', id: 'ASIANPAINT', name: 'Asian Paints Ltd', sector: 'Consumer Durables', macap: 'Mid', type: 'STOCK', reco: 'Hold', atp: 2432.1, qty: 12 },
+    { isin: 'INE030A01027', id: 'HINDUNILVR', name: 'Hindustan Unilever Ltd', sector: 'Fast Moving Consumer Goods', macap: 'Mid', type: 'STOCK', reco: 'Buy', atp: 2354.4, qty: 7 },
+    { isin: 'INE038A01020', id: 'HINDALCO', name: 'Hindalco Industries Ltd', sector: 'Metals & Mining', macap: 'Mid', type: 'STOCK', reco: 'Buy', atp: 935.45, qty: 15 },
+    { isin: 'INE040A01034', id: 'HDFCBANK', name: 'HDFC Bank Ltd', sector: 'Financial Services', macap: 'Mid', type: 'STOCK', reco: 'Buy', atp: 949.7, qty: 10 },
+    { isin: 'INE044A01036', id: 'SUNPHARMA', name: 'Sun Pharmaceutical Industries Ltd', sector: 'Healthcare', macap: 'Mid', type: 'STOCK', reco: 'Buy', atp: 1702.6, qty: 8 },
+    { isin: 'INE066A01021', id: 'EICHERMOT', name: 'Eicher Motors Ltd', sector: 'Automobile and Auto Components', macap: 'Mid', type: 'STOCK', reco: 'Sell', atp: 7209.5, qty: 6 },
+    { isin: 'INE075A01022', id: 'WIPRO', name: 'Wipro Ltd', sector: 'Information Technology', macap: 'Mid', type: 'STOCK', reco: 'Sell', atp: 233.39, qty: 9 },
+    { isin: 'INE154A01025', id: 'ITC', name: 'ITC Ltd', sector: 'Fast Moving Consumer Goods', macap: 'Mid', type: 'STOCK', reco: 'Buy', atp: 310.2, qty: 5 },
+    { isin: 'INE158A01026', id: 'HEROMOTOCO', name: 'Hero MotoCorp Ltd', sector: 'Automobile and Auto Components', macap: 'Mid', type: 'STOCK', reco: 'Buy', atp: 5766, qty: 10 },
+    { isin: 'INE235A01022', id: 'FINCABLES', name: 'Finolex Cables Ltd', sector: 'Capital Goods', macap: 'Small', type: 'STOCK', reco: 'Hold', atp: 745.5, qty: 8 },
+    { isin: 'INE481G01011', id: 'ULTRACEMCO', name: 'UltraTech Cement Ltd', sector: 'Construction Materials', macap: 'Mid', type: 'STOCK', reco: 'Buy', atp: 12773, qty: 3 },
+    { isin: 'INE585B01010', id: 'MARUTI', name: 'Maruti Suzuki India Ltd', sector: 'Automobile and Auto Components', macap: 'Mid', type: 'STOCK', reco: 'Buy', atp: 15059, qty: 10 },
+    { isin: 'INE732A01036', id: 'KIRLOSBROS', name: 'Kirloskar Brothers Ltd', sector: 'Capital Goods', macap: 'Small', type: 'STOCK', reco: 'Hold', atp: 1545.2, qty: 6 },
+    { isin: 'INE742F01042', id: 'ADANIPORTS', name: 'Adani Ports & SEZ Ltd', sector: 'Services', macap: 'Mid', type: 'STOCK', reco: 'Buy', atp: 1570.2, qty: 20 },
+    { isin: 'INE787D01026', id: 'BALKRISIND', name: 'Balkrishna Industries Ltd', sector: 'Automobile and Auto Components', macap: 'Small', type: 'STOCK', reco: 'Hold', atp: 2687.8, qty: 5 },
+    { isin: 'INE795G01014', id: 'HDFCLIFE', name: 'HDFC Life Insurance Company Ltd', sector: 'Financial Services', macap: 'Mid', type: 'STOCK', reco: 'Buy', atp: 720.7, qty: 18 },
+    { isin: 'INE917I01010', id: 'BAJAJ-AUTO', name: 'Bajaj Auto Ltd', sector: 'Automobile and Auto Components', macap: 'Mid', type: 'STOCK', reco: 'Buy', atp: 9647, qty: 6 },
+    { isin: 'INF109K01AN2', id: 'ICICI_MIDCAP', name: 'ICICI Pru Midcap Fund(G)', sector: 'Mid Cap Fund', macap: 'Mid', type: 'MF', reco: 'Buy', atp: 316.97, qty: 400 },
+    { isin: 'INF174K01211', id: 'KOTAK_SMALLCAP', name: 'Kotak Small Cap Fund(G)', sector: 'Small Cap Fund', macap: 'Small', type: 'MF', reco: 'Sell', atp: 240.097, qty: 200 },
+    { isin: 'INF179K01BE2', id: 'HDFC_LARGECAP', name: 'HDFC Large Cap Fund(G)', sector: 'Large Cap Fund', macap: 'Large', type: 'MF', reco: 'Buy', atp: 1439.42762, qty: 500 },
+    { isin: 'INF179K01CR2', id: 'HDFC_MIDCAP', name: 'HDFC Mid-Cap Opportunities Fund(G)', sector: 'Mid Cap Fund', macap: 'Mid', type: 'MF', reco: 'Buy', atp: 203.231, qty: 200 },
+    { isin: 'INF204K01562', id: 'NIPPON_LARGECAP', name: 'Nippon India Large Cap Fund(G)', sector: 'Large Cap Fund', macap: 'Large', type: 'MF', reco: 'Buy', atp: 92.7289, qty: 400 },
+    { isin: 'INF247L01411', id: 'MOTILAL_MIDCAP', name: 'Motilal Oswal Midcap Fund-Reg(G)', sector: 'Mid Cap Fund', macap: 'Mid', type: 'MF', reco: 'Sell', atp: 93.9058, qty: 400 },
+    { isin: 'INF582M01BY1', id: 'UNION_SMALLCAP', name: 'Union Small Cap Fund-Reg(G)', sector: 'Small Cap Fund', macap: 'Small', type: 'MF', reco: 'Buy', atp: 48.15, qty: 300 },
+    { isin: 'INF663L01DZ4', id: 'PGIM_MIDCAP', name: 'PGIM India Midcap Opp Fund-Reg(G)', sector: 'Mid Cap Fund', macap: 'Mid', type: 'MF', reco: 'Buy', atp: 62.76, qty: 200 },
+    { isin: 'INF740K01797', id: 'DSP_SMALLCAP', name: 'DSP Small Cap Fund-Reg(G)', sector: 'Small Cap Fund', macap: 'Small', type: 'MF', reco: 'Buy', atp: 191.368, qty: 400 },
+    { isin: 'INF769K01010', id: 'MIRAE_LARGECAP', name: 'Mirae Asset Large Cap Fund(G)', sector: 'Large Cap Fund', macap: 'Large', type: 'MF', reco: 'Buy', atp: 115.33, qty: 300 },
+    { isin: 'INF917K01QC7', id: 'HSBC_SMALLCAP', name: 'HSBC Small Cap Fund-Reg(G)', sector: 'Small Cap Fund', macap: 'Small', type: 'MF', reco: 'Buy', atp: 75.3994, qty: 300 },
+    { isin: 'INF966L01AW4', id: 'QUANT_LARGECAP', name: 'Quant Large Cap Fund-Reg(G)', sector: 'Large Cap Fund', macap: 'Large', type: 'MF', reco: 'Sell', atp: 14.9294, qty: 300 },
+  ];
+  const PORTFOLIO_AS_OF = new Date('2026-07-08');
+  function buildHolding(raw) {
+    const priceRng = mulberry32(hashSeed(raw.isin));
+    const movement = -0.35 + priceRng() * 0.80;
+    const currentPrice = Math.max(0.5, raw.atp * (1 + movement));
+    const daysAgo = Math.round(30 + priceRng() * 1070);
+    const purchaseDate = new Date(PORTFOLIO_AS_OF.getTime() - daysAgo * 86400000);
+    const capProfile = raw.macap === 'Large' ? { expReturn: 0.11, vol: 0.16 } : raw.macap === 'Mid' ? { expReturn: 0.135, vol: 0.22 } : { expReturn: 0.16, vol: 0.28 };
+    const factorRng = mulberry32(hashSeed(raw.isin + 'factors'));
+    return {
+      id: raw.id, isin: raw.isin, name: raw.name, sector: raw.sector, macap: raw.macap, type: raw.type, reco: raw.reco,
+      qty: raw.qty, costBasis: raw.atp, currentPrice: Math.round(currentPrice * 100) / 100,
+      purchaseDate: purchaseDate.toISOString().slice(0, 10),
+      assetClass: 'Equity', expReturn: capProfile.expReturn, vol: capProfile.vol,
+      factors: {
+        value: Number((factorRng() * 4 - 2).toFixed(2)), quality: Number((factorRng() * 4 - 2).toFixed(2)), momentum: Number((factorRng() * 4 - 2).toFixed(2)),
+        size: raw.macap === 'Large' ? 1.3 : raw.macap === 'Mid' ? 0.5 : -0.6,
+        lowvol: raw.macap === 'Large' ? 0.8 : raw.macap === 'Mid' ? 0.1 : -0.7,
+      },
+    };
+  }
+  const REAL_HOLDINGS = RAW_HOLDINGS.map(buildHolding);
+
   // ============================== UC1: Goal-Based Asset Allocation ==============================
   function horizonBucket(years) { if (years < 3) return 'short'; if (years <= 7) return 'medium'; return 'long'; }
   function applyGuardrails(baseWeights, riskCategory) {
@@ -374,7 +441,7 @@
   }
 
   // ============================== UC3: Mean-Variance & Factor Optimization ==============================
-  function buildUniverse(ids) { return ids && ids.length ? UNIVERSE.filter((u) => ids.includes(u.id)) : UNIVERSE; }
+  function buildUniverse(ids) { return ids && ids.length ? REAL_HOLDINGS.filter((u) => ids.includes(u.id)) : REAL_HOLDINGS; }
   function buildCovariance(universe) {
     const n = universe.length;
     const Sigma = Array.from({ length: n }, () => new Array(n).fill(0));
@@ -659,7 +726,7 @@
   }
 
   // ============================== UC5: Tax-Loss Harvesting ==============================
-  function findSecurity(id) { return UNIVERSE.find((u) => u.id === id); }
+  function findSecurity(id) { return REAL_HOLDINGS.find((u) => u.id === id); }
   function factorSimilarity(a, b) {
     if (!a || !b) return 0;
     const keys = ['value', 'quality', 'momentum', 'size', 'lowvol'];
@@ -702,7 +769,8 @@
       const unoffsetAmount = Math.abs(lot.unrealizedLoss) - offsetAmount;
       if (offsetBucket === 'ltcg') remainingLTCGOffset -= offsetAmount; else remainingSTCGOffset -= offsetAmount;
       if (lot.isLongTerm) harvestedLTCG += Math.abs(lot.unrealizedLoss); else harvestedSTCG += Math.abs(lot.unrealizedLoss);
-      const candidates = UNIVERSE.filter((u) => u.id !== lot.security && u.assetClass === (sold ? sold.assetClass : u.assetClass));
+      let candidates = REAL_HOLDINGS.filter((u) => u.id !== lot.security && sold && u.type === sold.type && u.macap === sold.macap);
+      if (!candidates.length) candidates = REAL_HOLDINGS.filter((u) => u.id !== lot.security);
       let best = null, bestScore = -Infinity;
       for (const c of candidates) {
         const sim = factorSimilarity(sold, c), te = trackingErrorEstimate(sold, c);
@@ -720,12 +788,15 @@
   }
 
   // ============================== UC6: ESG & Mandate-Constrained Optimization ==============================
+  // Keeps its own small illustrative universe (with ESG/carbon fields), independent of UC3's
+  // universe (repointed to the client-supplied real-holdings dataset, which has no ESG/carbon data).
+  function buildUniverseUC6(ids) { return ids && ids.length ? UNIVERSE.filter((u) => ids.includes(u.id)) : UNIVERSE; }
   function runEsgOptimization(input) {
     const {
       universeIds = null, exclusions = EXCLUSION_LIST, esgMin = 65, carbonMax = 35, teMax = 0.06,
       boxMax = 0.30, shrinkageIntensity = 0.3, riskAversion = 3,
     } = input;
-    const universe = buildUniverse(universeIds);
+    const universe = buildUniverseUC6(universeIds);
     const n = universe.length;
     const mu = universe.map((u) => u.expReturn);
     const sampleSigma = buildCovariance(universe);
@@ -833,19 +904,28 @@
     },
     uc3: {
       objective: 'maxSharpe', riskFreeRate: 0.065, shrinkageIntensity: 0.3, useBlackLitterman: true,
-      views: [{ assetId: 'TCS', viewReturn: 0.16, confidence: 0.6 }],
-      sectorCaps: { IT: 0.30, Financials: 0.30 }, boxMax: 0.25, riskAversion: 3, turnoverCap: null,
-      currentHoldings: { RELIANCE: 0.12, TCS: 0.08, HDFCBANK: 0.15, NIFTYBEES: 0.20, GOLDBEES: 0.05, LIQUIDBEES: 0.10 },
+      views: [{ assetId: 'HDFCBANK', viewReturn: 0.16, confidence: 0.6 }],
+      sectorCaps: { 'Information Technology': 0.15, 'Financial Services': 0.30 }, boxMax: 0.15, riskAversion: 3, turnoverCap: null,
+      currentHoldings: (() => {
+        const total = REAL_HOLDINGS.reduce((s, h) => s + h.qty * h.currentPrice, 0);
+        const out = {}; REAL_HOLDINGS.forEach((h) => { out[h.id] = Number(((h.qty * h.currentPrice) / total).toFixed(4)); }); return out;
+      })(),
       transactionCostBps: 15,
     },
-    uc4: {
-      lots: SAMPLE_LOTS,
-      targetWeights: { RELIANCE: 0.12, TCS: 0.10, HDFCBANK: 0.15, INFY: 0.08, ITC: 0.05, LT: 0.08, NIFTYBEES: 0.25, GOLDBEES: 0.07, LIQUIDBEES: 0.10 },
-      driftBandAbs: 0.05, driftBandRel: 0.20, policy: 'threshold', cashflow: 50000, transactionCostBps: 10, minTradeValue: 5000,
-    },
+    uc4: (() => {
+      const lots = REAL_HOLDINGS.map((h) => ({ id: h.isin, security: h.id, qty: h.qty, costBasis: h.costBasis, purchaseDate: h.purchaseDate, currentPrice: h.currentPrice }));
+      const total = REAL_HOLDINGS.reduce((s, h) => s + h.qty * h.currentPrice, 0);
+      const rawTargets = {};
+      REAL_HOLDINGS.forEach((h) => { const cw = (h.qty * h.currentPrice) / total; rawTargets[h.id] = h.reco === 'Sell' ? 0 : h.reco === 'Buy' ? cw * 1.4 : cw; });
+      const targetSum = Object.values(rawTargets).reduce((a, b) => a + b, 0) || 1;
+      const targetWeights = {};
+      Object.entries(rawTargets).forEach(([id, w]) => { targetWeights[id] = Number((w / targetSum).toFixed(4)); });
+      return { lots, targetWeights, driftBandAbs: 0.05, driftBandRel: 0.20, policy: 'threshold', cashflow: 50000, transactionCostBps: 10, minTradeValue: 2000 };
+    })(),
     uc5: {
-      lots: SAMPLE_LOTS, realizedGainsYTD: { stcg: 15000, ltcg: 40000 }, washSaleWindowDays: 30,
-      minHarvestableLoss: 1000, recentlyPurchased: [],
+      lots: REAL_HOLDINGS.map((h) => ({ id: h.isin, security: h.id, qty: h.qty, costBasis: h.costBasis, purchaseDate: h.purchaseDate, currentPrice: h.currentPrice })),
+      realizedGainsYTD: { stcg: 15000, ltcg: 40000 }, washSaleWindowDays: 30,
+      minHarvestableLoss: 500, recentlyPurchased: [],
     },
     uc6: { exclusions: EXCLUSION_LIST, esgMin: 65, carbonMax: 35, teMax: 0.06, boxMax: 0.30 },
     uc7: {
@@ -867,4 +947,5 @@
     uc6: { run: runEsgOptimization, sample: SAMPLES.uc6 },
     uc7: { run: runRoboAdvisory, sample: SAMPLES.uc7 },
   };
+  global.WISRealHoldings = REAL_HOLDINGS;
 })(window);
