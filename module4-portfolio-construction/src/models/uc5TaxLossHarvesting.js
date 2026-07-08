@@ -76,10 +76,12 @@ function runTaxLossHarvesting(input) {
       }
     }
 
-    // Offset against available gains bucket, preferring same-type bucket first.
+    // Offset against available gains bucket, preferring same-type bucket first (STCG losses offset STCG
+    // gains, LTCG losses offset LTCG gains -- the timing rule this use case exists to apply).
     let offsetBucket = lot.isLongTerm ? 'ltcg' : 'stcg';
     const available = offsetBucket === 'ltcg' ? remainingLTCGOffset : remainingSTCGOffset;
     const offsetAmount = Math.min(Math.abs(lot.unrealizedLoss), Math.max(available, 0));
+    const unoffsetAmount = Math.abs(lot.unrealizedLoss) - offsetAmount;
     if (offsetBucket === 'ltcg') remainingLTCGOffset -= offsetAmount; else remainingSTCGOffset -= offsetAmount;
 
     if (lot.isLongTerm) harvestedLTCG += Math.abs(lot.unrealizedLoss);
@@ -103,6 +105,10 @@ function runTaxLossHarvesting(input) {
       unrealizedLoss: Math.round(lot.unrealizedLoss),
       holdingType: lot.isLongTerm ? 'LTCG' : 'STCG',
       taxBenefit: Math.round(lot.taxBenefit),
+      offsetBucket,
+      offsetApplied: Math.round(offsetAmount),
+      unoffsetAmount: Math.round(unoffsetAmount),
+      remainingCapacityAfter: Math.round(Math.max(offsetBucket === 'ltcg' ? remainingLTCGOffset : remainingSTCGOffset, 0)),
       replacement: best ? { security: best.id, name: best.name, similarity: best.similarity, trackingError: best.trackingError } : null,
     });
   }

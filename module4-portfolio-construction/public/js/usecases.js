@@ -71,19 +71,19 @@
 
   const USE_CASES = [
     {
-      key: 'uc1', tag: 'M4-UC1', title: 'Goal-Based Asset Allocation', api: '/api/uc1',
+      key: 'uc1', tag: 'M4-UC1', title: 'Goal-Based Asset Allocation', api: '/api/uc1', customPage: true,
       objective: 'Map each client goal to an asset allocation using time-horizon bucketing and a probability-of-success score, and emit rebalancing triggers and scenario paths.',
       frs: ['FR-GA-01 Multi-goal capture (Must)', 'FR-GA-02 Horizon glide-path (Must)', 'FR-GA-03 Probability of success (Must)', 'FR-GA-04 SIP goal-seek (Must)', 'FR-GA-05 Rebalancing triggers (Must)', 'FR-GA-06 CMA governance (Should)', 'FR-GA-07 Household aggregation (Should)'],
       tour: [
-        { fr: 'FR-GA-01', priority: 'Must Have', status: 'partial', selector: '#input-panel',
+        { fr: 'FR-GA-01', priority: 'Must Have', status: 'partial', selector: '#panel-uc1-goals',
           requirement: 'Capture goals with target corpus, target date, priority and flexibility; support multiple concurrent goals per client.',
-          achieved: 'The input JSON\'s goals[] array captures target corpus (targetAmount) and target date (horizonYears), and the model processes multiple concurrent goals (see the 3-goal sample). Gap: "priority" and "flexibility" fields are not yet captured or used by the allocation logic — every goal is currently treated with equal priority.' },
+          achieved: 'Each goal card captures a target corpus (target amount) and target date (horizon), and you can hold multiple concurrent goals (see the seeded goals here). Gap: "priority" and "flexibility" are not yet captured or used by the allocation logic — every goal is currently treated with equal priority.' },
         { fr: 'FR-GA-02', priority: 'Must Have', status: 'full', selector: '#panel-uc1-goal-table',
           requirement: 'Bucket each goal into short / medium / long horizon and map to a glide-path allocation across equity, debt, gold, cash and international.',
           achieved: 'The "Horizon" column shows each goal\'s bucket (short <3y / medium 3–7y / long >7y). The recommended weights behind each row cover all 5 asset classes from a governed glide-path matrix, then clipped to the client\'s risk-category guardrails.' },
         { fr: 'FR-GA-03', priority: 'Must Have', status: 'full', selector: '#panel-uc1-goal-table',
           requirement: 'Compute a probability-of-success (goal-attainment) score per goal via forward simulation of the mapped allocation.',
-          achieved: 'The "P(success)" and "Attainment Score" columns come from a forward Monte Carlo simulation of the mapped glide-path allocation against the required, inflation-adjusted corpus.' },
+          achieved: 'The "P(success)" and "Attainment Score" columns come from a forward Monte Carlo simulation of the mapped glide-path allocation against the required, inflation-adjusted corpus, using the funds you\'ve actually allocated to each goal.' },
         { fr: 'FR-GA-04', priority: 'Must Have', status: 'partial', selector: '#panel-uc1-goal-table',
           requirement: 'Recommend asset-class weights and required monthly investment (SIP) to close any funding gap.',
           achieved: 'The "Required SIP" column is solved by goal-seek (bisection) to close the funding gap. Gap: the spec also allows closing the gap via an allocation shift; this prototype only solves via SIP, not by also adjusting the recommended weights.' },
@@ -97,70 +97,367 @@
           requirement: 'Return goal-level and household-level aggregated views (combined allocation across all goals).',
           achieved: 'Goal-level rows are shown in the table above; this chart is the household-level aggregation, weighted by each goal\'s required corpus.' },
       ],
-      render(container, data) {
-        container.innerHTML = '';
-        const metrics = el('div', 'metric-row');
-        metrics.appendChild(metricCard('Goals Modelled', data.goalAllocations.length, null,
-          'Count of goals in your input JSON that were run through the horizon-bucketing + probability-of-success model (one row per goal below).'));
-        const cmaCard = metricCard('CMA Version', data.assumptionSet.version, data.assumptionSet.effectiveDate,
-          'Capital-market assumptions (expected return, volatility, correlation per asset class) used for every projection in this run — governed & version-stamped per FR-GA-06. Currently the illustrative sample set; replace with a licensed house view before production.');
-        cmaCard.id = 'm-uc1-cma';
-        metrics.appendChild(cmaCard);
-        metrics.appendChild(metricCard('Rebalancing Triggers', data.rebalancingTriggers.length, null,
-          'Count of goals whose success probability fell below target, or household asset-class weights sitting at a risk-guardrail edge — see the table below for which (FR-GA-05).'));
-        container.appendChild(metrics);
+      renderPage(container, api) {
+        const C = global.WISControls;
+        const SECURITIES = [
+          { id: 'RELIANCE', name: 'Reliance Industries', price: 2870 },
+          { id: 'TCS', name: 'Tata Consultancy Services', price: 3820 },
+          { id: 'HDFCBANK', name: 'HDFC Bank', price: 1590 },
+          { id: 'INFY', name: 'Infosys', price: 1690 },
+          { id: 'NIFTYBEES', name: 'Nifty 50 ETF', price: 268 },
+          { id: 'GOLDBEES', name: 'Gold ETF', price: 63 },
+          { id: 'LIQUIDBEES', name: 'Liquid / Debt Fund', price: 101.8 },
+        ];
+        const ICONS = ['🎓', '🏖️', '🏠', '🚗', '✈️', '💍', '🎯', '👶', '🏥'];
 
-        const panel1 = el('div', 'panel');
-        panel1.id = 'panel-uc1-goal-table';
-        panel1.appendChild(panelTitle('Goal Allocations',
-          'Each row: horizon → governed glide-path allocation (FR-GA-02), then a forward Monte Carlo projection estimates the probability of meeting the inflation-adjusted required corpus (FR-GA-03). If that probability was below your target, the required monthly SIP was solved via goal-seek to lift it back to target (FR-GA-04) — a score of 100/100 means the solved SIP exactly reaches your target probability, not that the goal is risk-free.'));
-        panel1.appendChild(table(
-          ['Goal', 'Horizon', 'Required Corpus', 'Required SIP', 'Attainment Score', 'P(success)'],
-          data.goalAllocations.map((g) => [
-            g.goalName, g.horizonBucket,
-            '₹' + fmtCompact(g.requiredCorpus), '₹' + fmtCompact(g.requiredMonthlySip) + '/mo',
-            g.goalAttainmentScore + '/100', fmtPct(g.probability),
-          ])
-        ));
-        container.appendChild(panel1);
+        let goals = [
+          { id: 'g1', icon: '🎓', name: 'Child Education', targetAmount: 3000000, horizonYears: 12, inflation: 0.08, allocatedHoldings: [{ security: 'NIFTYBEES', amount: 400000 }], monthlySip: 8000, lumpSum: 0 },
+          { id: 'g2', icon: '🏖️', name: 'Retirement', targetAmount: 20000000, horizonYears: 25, inflation: 0.06, allocatedHoldings: [{ security: 'NIFTYBEES', amount: 1500000 }], monthlySip: 15000, lumpSum: 0 },
+          { id: 'g3', icon: '🏠', name: 'Home Down-payment', targetAmount: 2000000, horizonYears: 4, inflation: 0.06, allocatedHoldings: [{ security: 'LIQUIDBEES', amount: 300000 }], monthlySip: 20000, lumpSum: 100000 },
+          { id: 'g4', icon: '🚗', name: 'My Dream Car', targetAmount: 250000, horizonYears: 6, inflation: 0.06, allocatedHoldings: [], monthlySip: 5000, lumpSum: 0 },
+        ];
+        let selectedGoalId = null;
+        let riskCategory = 3;
+        let targetSuccessProbability = 0.80;
+        let lastResult = null;
 
-        const two = el('div', 'two-col');
-        const p2 = el('div', 'panel');
-        p2.id = 'panel-uc1-household';
-        p2.appendChild(panelTitle('Household Allocation (aggregated across goals)',
-          'Weighted average of each goal\'s recommended allocation, weighted by that goal\'s required corpus — larger goals pull the household mix more (FR-GA-07). Not a separate model; purely a roll-up of the rows above.'));
-        const chart1 = el('div', 'chart-wrap');
-        p2.appendChild(chart1);
-        two.appendChild(p2);
-
-        const p3 = el('div', 'panel');
-        p3.id = 'panel-uc1-triggers';
-        p3.appendChild(panelTitle('Rebalancing Triggers',
-          '"probability" triggers fire when a goal\'s P(success) is below your targetSuccessProbability input. "drift" triggers fire when the household allocation for an asset class sits at the edge of its risk-category guardrail band.'));
-        if (data.rebalancingTriggers.length) {
-          p3.appendChild(table(['Type', 'Scope', 'Threshold', 'Current'], data.rebalancingTriggers.map((t) => [
-            t.type, t.goal || t.assetClass, t.threshold != null ? t.threshold : t.band, t.currentValue,
-          ])));
-        } else {
-          p3.appendChild(el('div', 'empty-hint', 'No triggers breached'));
+        function goalCurrentValue(g) { return g.allocatedHoldings.reduce((s, h) => s + h.amount, 0) + (g.currentValue || 0); }
+        function fmtDate(yearsFromNow) {
+          const d = new Date(); d.setFullYear(d.getFullYear() + Math.round(yearsFromNow));
+          return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
         }
-        two.appendChild(p3);
-        container.appendChild(two);
 
-        barChart(chart1, Object.entries(data.householdAllocation).map(([k, v]) => ({ label: k, value: v })), {
-          valueFormatter: (v) => fmtPct(v), max: 1,
-        });
+        const goalsPanel = el('div', 'panel');
+        goalsPanel.id = 'panel-uc1-goals';
+        const workspacePanel = el('div');
+        const settingsPanel = el('div', 'panel');
+        const runRow = el('div', 'panel');
+        const resultsPanel = el('div');
+        container.appendChild(settingsPanel);
+        container.appendChild(goalsPanel);
+        container.appendChild(workspacePanel);
+        container.appendChild(runRow);
+        container.appendChild(resultsPanel);
 
-        const p4 = el('div', 'panel');
-        p4.appendChild(panelTitle('Scenario Wealth Paths (5th–95th percentile band, gold = median)',
-          'A separate 500-path Monte Carlo run per goal (distinct from the probability-of-success calculation above, which uses its own simulation count) under the same capital-market assumptions and this goal\'s contribution schedule — shown to illustrate the dispersion of outcomes, not a single predicted number.'));
-        data.scenarioPaths.forEach((sp) => {
-          p4.appendChild(el('div', null, `<strong>${sp.goalName}</strong>`));
-          const cw = el('div', 'chart-wrap');
-          p4.appendChild(cw);
-          bandChart(cw, sp.series, { xLabel: (i) => 'Yr ' + i });
-        });
-        container.appendChild(p4);
+        function renderSettings() {
+          settingsPanel.innerHTML = '';
+          settingsPanel.appendChild(panelTitle('Household Settings', 'Applied across every goal when computing allocations — risk category sets the guardrail band for the glide-path; target success probability drives the SIP goal-seek.'));
+          const grid = el('div', 'form-grid');
+          const riskField = C.selectInput({ value: String(riskCategory), options: [1, 2, 3, 4, 5].map((n) => ({ value: String(n), label: `Category ${n}` })), onChange: (v) => { riskCategory = Number(v); } });
+          grid.appendChild(C.field('Risk Category', riskField, '1 = most conservative, 5 = most aggressive. Sets the min/max guardrail band around each goal\'s glide-path allocation.'));
+          const targetField = C.sliderInput({ value: targetSuccessProbability * 100, min: 50, max: 95, step: 5, format: (v) => v + '%', onChange: (v) => { targetSuccessProbability = v / 100; } });
+          grid.appendChild(C.field('Target Success Probability', targetField, 'If a goal\'s simulated probability of success falls below this, the required SIP is solved upward to close the gap.'));
+          settingsPanel.appendChild(grid);
+        }
+
+        function renderGoalCards() {
+          goalsPanel.innerHTML = '';
+          goalsPanel.appendChild(panelTitle('Your Goals', 'Each card is a financial goal. Click one to allocate existing holdings or set up a SIP toward it — that funding is what the model (below) uses to compute its probability of success.'));
+          const list = el('div', 'goal-card-list');
+          goals.forEach((g) => {
+            const cur = goalCurrentValue(g);
+            const pct = Math.min(100, Math.round((cur / g.targetAmount) * 100));
+            const card = el('div', 'goal-card' + (g.id === selectedGoalId ? ' active' : ''));
+            card.innerHTML = `
+              <div class="goal-card-icon">${g.icon}</div>
+              <div class="goal-card-name">${g.name}</div>
+              <div class="goal-progress-track"><div class="goal-progress-fill" style="width:${pct}%"></div></div>
+              <div class="goal-card-meta"><span>₹${fmtCompact(cur)} of ₹${fmtCompact(g.targetAmount)}</span><span>${pct}%</span></div>
+            `;
+            card.addEventListener('click', () => { selectedGoalId = g.id; renderGoalCards(); renderWorkspace(); });
+            list.appendChild(card);
+          });
+          const addCard = el('div', 'goal-card-add', '+ Add Goal');
+          addCard.addEventListener('click', () => openAddGoalModal());
+          list.appendChild(addCard);
+          goalsPanel.appendChild(list);
+        }
+
+        function openAddGoalModal() {
+          const body = el('div');
+          const nameField = C.textInput({ placeholder: 'e.g. Dream Vacation' });
+          body.appendChild(C.field('Goal Name', nameField));
+          const iconField = C.selectInput({ value: ICONS[0], options: ICONS.map((i) => ({ value: i, label: i })) });
+          body.appendChild(C.field('Icon', iconField));
+          const amountField = C.numberInput({ value: 500000, step: 10000, prefix: '₹' });
+          body.appendChild(C.field('Target Amount (today\'s ₹)', amountField));
+          const yearsField = C.numberInput({ value: 5, step: 1, suffix: 'yrs' });
+          body.appendChild(C.field('Time to Goal', yearsField));
+          C.showModal({
+            icon: '🎯', title: 'Add a New Goal', bodyEl: body,
+            actions: [
+              { label: 'Cancel', className: 'btn-secondary' },
+              { label: 'Create Goal', className: 'btn-accent', onClick: () => {
+                const id = 'g' + Date.now();
+                goals.push({ id, icon: iconField.getValue(), name: nameField.getValue() || 'New Goal', targetAmount: amountField.getValue() || 100000, horizonYears: yearsField.getValue() || 1, inflation: 0.06, allocatedHoldings: [], monthlySip: 0, lumpSum: 0 });
+                selectedGoalId = id;
+                renderGoalCards(); renderWorkspace();
+              } },
+            ],
+          });
+        }
+
+        function openAllocateFundsModal(goal) {
+          const body = el('div');
+          const secField = C.selectInput({ value: SECURITIES[0].id, options: SECURITIES.map((s) => ({ value: s.id, label: s.name })) });
+          body.appendChild(C.field('Security / Fund', secField));
+          const amountField = C.numberInput({ value: 50000, step: 5000, prefix: '₹' });
+          body.appendChild(C.field('Amount to Allocate', amountField, 'Value of existing holdings you want to earmark toward this goal.'));
+          C.showModal({
+            icon: '📦', title: `Allocate Funds — ${goal.name}`, bodyEl: body,
+            actions: [
+              { label: 'Cancel', className: 'btn-secondary' },
+              { label: 'Allocate', className: 'btn-accent', onClick: () => {
+                const sec = SECURITIES.find((s) => s.id === secField.getValue());
+                goal.allocatedHoldings.push({ security: sec.id, amount: amountField.getValue() || 0 });
+                renderGoalCards(); renderWorkspace();
+              } },
+            ],
+          });
+        }
+
+        function openInvestModal(goal) {
+          const body = el('div');
+          const sipField = C.numberInput({ value: goal.monthlySip || 1000, step: 500, prefix: '₹' });
+          body.appendChild(C.field('Monthly SIP Amount', sipField, 'Recurring monthly investment committed toward this goal.'));
+          C.showModal({
+            icon: '💰', title: `Invest in Goal — ${goal.name}`, bodyEl: body,
+            actions: [
+              { label: 'Cancel', className: 'btn-secondary' },
+              { label: 'Save SIP', className: 'btn-accent', onClick: () => {
+                goal.monthlySip = sipField.getValue() || 0;
+                renderGoalCards(); renderWorkspace();
+              } },
+            ],
+          });
+        }
+
+        function renderWorkspace() {
+          workspacePanel.innerHTML = '';
+          const goal = goals.find((g) => g.id === selectedGoalId);
+          if (!goal) return;
+          const cur = goalCurrentValue(goal);
+          const pct = Math.min(100, Math.round((cur / goal.targetAmount) * 100));
+          const remaining = Math.max(0, goal.targetAmount - cur);
+
+          const panel = el('div', 'panel');
+          panel.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+              <div style="display:flex;align-items:center;gap:10px;">
+                <span style="font-size:26px;">${goal.icon}</span>
+                <div>
+                  <div style="font-weight:700;font-size:16px;">${goal.name}</div>
+                  <div style="font-size:11.5px;color:var(--text-muted);">₹${fmtCompact(cur)} of ₹${fmtCompact(goal.targetAmount)}</div>
+                </div>
+              </div>
+            </div>
+          `;
+          const backBtn = el('button', 'btn btn-secondary', '← Back to Goals');
+          backBtn.addEventListener('click', () => { selectedGoalId = null; renderGoalCards(); renderWorkspace(); });
+          panel.insertBefore(backBtn, panel.firstChild);
+
+          const progressWrap = el('div');
+          progressWrap.innerHTML = `<div class="goal-progress-track" style="height:10px;margin:10px 0 8px 0;"><div class="goal-progress-fill" style="width:${pct}%"></div></div>
+            <div class="goal-card-meta" style="margin-bottom:14px;"><span>Remaining Time: ${goal.horizonYears} yrs</span><span>Remaining Amount: ₹${fmtCompact(remaining)}</span></div>`;
+          panel.appendChild(progressWrap);
+
+          const detailTable = table(['Field', 'Value'], [
+            ['Current Allocated Holding Value', '₹' + fmtCompact(goal.allocatedHoldings.reduce((s, h) => s + h.amount, 0))],
+            ['Monthly SIP Investment', '₹' + fmtCompact(goal.monthlySip)],
+            ['End Date', fmtDate(goal.horizonYears)],
+          ]);
+          panel.appendChild(detailTable);
+
+          const tabsRow = el('div', 'allocation-tabs');
+          const holdingsTab = el('div', 'allocation-tab active', 'Holdings');
+          const sipTab = el('div', 'allocation-tab', 'SIP');
+          tabsRow.appendChild(holdingsTab); tabsRow.appendChild(sipTab);
+          panel.appendChild(el('div', 'panel-title', 'Allocation'));
+          panel.appendChild(tabsRow);
+
+          const tabBody = el('div');
+          panel.appendChild(tabBody);
+
+          function renderHoldingsTab() {
+            tabBody.innerHTML = '';
+            if (!goal.allocatedHoldings.length) {
+              const empty = el('div', 'empty-box');
+              empty.innerHTML = `<div class="empty-box-icon">📭</div><div class="empty-box-title">No funds allocated</div><div>You have not allocated any mutual fund holdings to your current goal.</div>`;
+              const btnRow = el('div', 'form-actions-row'); btnRow.style.justifyContent = 'center'; btnRow.style.marginTop = '14px';
+              const investBtn = el('button', 'btn btn-secondary', 'Invest in Goal');
+              investBtn.addEventListener('click', () => openInvestModal(goal));
+              const allocBtn = el('button', 'btn btn-accent', 'Allocate Funds');
+              allocBtn.addEventListener('click', () => openAllocateFundsModal(goal));
+              btnRow.appendChild(investBtn); btnRow.appendChild(allocBtn);
+              empty.appendChild(btnRow);
+              tabBody.appendChild(empty);
+            } else {
+              tabBody.appendChild(table(['Security', 'Amount', ''], goal.allocatedHoldings.map((h, idx) => {
+                const sec = SECURITIES.find((s) => s.id === h.security);
+                const removeBtn = el('button', 'btn btn-secondary', 'Remove');
+                removeBtn.style.padding = '4px 10px'; removeBtn.style.fontSize = '11px';
+                removeBtn.addEventListener('click', () => { goal.allocatedHoldings.splice(idx, 1); renderGoalCards(); renderWorkspace(); });
+                return [sec ? sec.name : h.security, '₹' + fmtCompact(h.amount), removeBtn];
+              })));
+              const allocBtn = el('button', 'btn btn-accent', '+ Allocate More Funds');
+              allocBtn.style.marginTop = '10px';
+              allocBtn.addEventListener('click', () => openAllocateFundsModal(goal));
+              tabBody.appendChild(allocBtn);
+            }
+          }
+          function renderSipTab() {
+            tabBody.innerHTML = '';
+            if (!goal.monthlySip) {
+              const empty = el('div', 'empty-box');
+              empty.innerHTML = `<div class="empty-box-icon">🔁</div><div class="empty-box-title">No SIP set up</div><div>Set up a recurring monthly investment toward this goal.</div>`;
+              const investBtn = el('button', 'btn btn-accent', 'Invest in Goal');
+              investBtn.style.marginTop = '14px';
+              investBtn.addEventListener('click', () => openInvestModal(goal));
+              empty.appendChild(investBtn);
+              tabBody.appendChild(empty);
+            } else {
+              tabBody.appendChild(table(['Monthly SIP', ''], [[
+                '₹' + fmtCompact(goal.monthlySip) + '/mo',
+                (() => { const b = el('button', 'btn btn-secondary', 'Edit SIP'); b.style.padding = '4px 10px'; b.style.fontSize = '11px'; b.addEventListener('click', () => openInvestModal(goal)); return b; })(),
+              ]]));
+            }
+          }
+          holdingsTab.addEventListener('click', () => { holdingsTab.classList.add('active'); sipTab.classList.remove('active'); renderHoldingsTab(); });
+          sipTab.addEventListener('click', () => { sipTab.classList.add('active'); holdingsTab.classList.remove('active'); renderSipTab(); });
+          renderHoldingsTab();
+
+          const deleteBtn = el('button', 'btn btn-secondary', '🗑 Delete Goal');
+          deleteBtn.style.marginTop = '16px';
+          deleteBtn.addEventListener('click', () => {
+            goals = goals.filter((g) => g.id !== goal.id);
+            selectedGoalId = null;
+            renderGoalCards(); renderWorkspace();
+          });
+          panel.appendChild(deleteBtn);
+
+          workspacePanel.appendChild(panel);
+        }
+
+        function renderRunRow() {
+          runRow.innerHTML = '';
+          const btn = el('button', 'btn btn-accent', 'Run Financial Plan');
+          btn.style.fontSize = '14px'; btn.style.padding = '11px 22px';
+          const tourBtn = api.makeTourButton();
+          const status = el('div', 'status-line');
+          btn.addEventListener('click', async () => {
+            status.textContent = 'Running model...'; status.className = 'status-line';
+            btn.disabled = true;
+            try {
+              const payload = {
+                riskCategory, targetSuccessProbability,
+                goals: goals.map((g) => ({ name: g.name, targetAmount: g.targetAmount, horizonYears: g.horizonYears, inflation: g.inflation, currentValue: goalCurrentValue(g), lumpSum: g.lumpSum || 0, monthlySip: g.monthlySip || 0 })),
+              };
+              const result = await api.runModel(api.uc, payload);
+              lastResult = result;
+              status.textContent = 'Model executed successfully.'; status.className = 'status-line ok';
+              renderResults(result);
+              tourBtn.disabled = false;
+            } catch (err) {
+              status.textContent = 'Error: ' + err.message; status.className = 'status-line error';
+            } finally {
+              btn.disabled = false;
+            }
+          });
+          runRow.appendChild(btn);
+          runRow.appendChild(tourBtn);
+          runRow.appendChild(status);
+        }
+
+        function renderResults(data) {
+          resultsPanel.innerHTML = '';
+          const intro = el('div', 'note-box');
+          intro.style.background = '#eef2f7'; intro.style.borderColor = 'var(--border)'; intro.style.color = 'var(--text)';
+          intro.textContent = 'Results below use the funds you\'ve actually allocated/committed to each goal above (not a generic assumption) — allocate more, or add a SIP, and re-run to see the probability move.';
+          resultsPanel.appendChild(intro);
+
+          const metrics = el('div', 'metric-row');
+          metrics.appendChild(metricCard('Goals Modelled', data.goalAllocations.length, null,
+            'Count of goals run through the horizon-bucketing + probability-of-success model (one row per goal below).'));
+          const cmaCard = metricCard('CMA Version', data.assumptionSet.version, data.assumptionSet.effectiveDate,
+            'Capital-market assumptions (expected return, volatility, correlation per asset class) used for every projection — governed & version-stamped per FR-GA-06.');
+          cmaCard.id = 'm-uc1-cma';
+          metrics.appendChild(cmaCard);
+          metrics.appendChild(metricCard('Rebalancing Triggers', data.rebalancingTriggers.length, null,
+            'Count of goals whose success probability fell below target, or household weights sitting at a risk-guardrail edge (FR-GA-05).'));
+          resultsPanel.appendChild(metrics);
+
+          const goalCardsRow = el('div', 'metric-row');
+          data.goalAllocations.forEach((g) => {
+            const card = el('div', 'metric-card');
+            card.style.flex = '1 1 220px';
+            const gaugeWrap = C.gauge(g.goalAttainmentScore, { size: 90, subLabel: 'attainment' });
+            const row = el('div'); row.style.display = 'flex'; row.style.gap = '10px'; row.style.alignItems = 'center';
+            row.appendChild(gaugeWrap);
+            const textWrap = el('div');
+            textWrap.innerHTML = `<div style="font-weight:700;font-size:13px;">${g.goalName}</div><div style="font-size:11px;color:var(--text-muted);">P(success) ${fmtPct(g.probability)}</div><div style="font-size:11px;color:var(--text-muted);">Needs ₹${fmtCompact(g.requiredMonthlySip)}/mo</div>`;
+            row.appendChild(textWrap);
+            card.appendChild(row);
+            goalCardsRow.appendChild(card);
+          });
+          resultsPanel.appendChild(goalCardsRow);
+
+          const panel1 = el('div', 'panel');
+          panel1.id = 'panel-uc1-goal-table';
+          panel1.appendChild(panelTitle('Goal Allocations — Detail',
+            'Each row: horizon → governed glide-path allocation (FR-GA-02), then a forward Monte Carlo projection estimates the probability of meeting the inflation-adjusted required corpus (FR-GA-03). If that probability was below your target, the required monthly SIP was solved via goal-seek to lift it back to target (FR-GA-04) — a score of 100/100 means the solved SIP exactly reaches your target probability, not that the goal is risk-free.'));
+          panel1.appendChild(table(
+            ['Goal', 'Horizon', 'Required Corpus', 'Required SIP', 'Attainment Score', 'P(success)'],
+            data.goalAllocations.map((g) => [
+              g.goalName, g.horizonBucket,
+              '₹' + fmtCompact(g.requiredCorpus), '₹' + fmtCompact(g.requiredMonthlySip) + '/mo',
+              g.goalAttainmentScore + '/100', fmtPct(g.probability),
+            ])
+          ));
+          resultsPanel.appendChild(panel1);
+
+          const two = el('div', 'two-col');
+          const p2 = el('div', 'panel');
+          p2.id = 'panel-uc1-household';
+          p2.appendChild(panelTitle('Household Allocation (aggregated across goals)',
+            'Weighted average of each goal\'s recommended allocation, weighted by that goal\'s required corpus — larger goals pull the household mix more (FR-GA-07). Not a separate model; purely a roll-up of the rows above.'));
+          const chart1 = el('div', 'chart-wrap');
+          p2.appendChild(chart1);
+          two.appendChild(p2);
+
+          const p3 = el('div', 'panel');
+          p3.id = 'panel-uc1-triggers';
+          p3.appendChild(panelTitle('Rebalancing Triggers',
+            '"probability" triggers fire when a goal\'s P(success) is below your target. "drift" triggers fire when the household allocation for an asset class sits at the edge of its risk-category guardrail band.'));
+          if (data.rebalancingTriggers.length) {
+            p3.appendChild(table(['Type', 'Scope', 'Threshold', 'Current'], data.rebalancingTriggers.map((t) => [
+              t.type, t.goal || t.assetClass, t.threshold != null ? t.threshold : t.band, t.currentValue,
+            ])));
+          } else {
+            p3.appendChild(el('div', 'empty-hint', 'No triggers breached'));
+          }
+          two.appendChild(p3);
+          resultsPanel.appendChild(two);
+
+          barChart(chart1, Object.entries(data.householdAllocation).map(([k, v]) => ({ label: k, value: v })), {
+            valueFormatter: (v) => fmtPct(v), max: 1,
+          });
+
+          const p4 = el('div', 'panel');
+          p4.appendChild(panelTitle('Scenario Wealth Paths (5th–95th percentile band, gold = median) — hover to see values',
+            'A separate 500-path Monte Carlo run per goal (distinct from the probability-of-success calculation above, which uses its own simulation count) under the same capital-market assumptions and this goal\'s contribution schedule — shown to illustrate the dispersion of outcomes, not a single predicted number.'));
+          data.scenarioPaths.forEach((sp) => {
+            p4.appendChild(el('div', null, `<strong>${sp.goalName}</strong>`));
+            const cw = el('div', 'chart-wrap');
+            p4.appendChild(cw);
+            bandChart(cw, sp.series, { xLabel: (i) => 'Yr ' + i });
+          });
+          resultsPanel.appendChild(p4);
+        }
+
+        renderSettings();
+        renderGoalCards();
+        renderRunRow();
+        resultsPanel.innerHTML = '<div class="empty-hint">Allocate funds to your goals above, then click "Run Financial Plan" to see results.</div>';
       },
     },
 
@@ -188,8 +485,90 @@
           requirement: 'Allow return model selection (i.i.d. normal, block bootstrap of historical, regime-switching).',
           achieved: 'The run manifest below records which return model was used for this run. Gap: only i.i.d. normal is implemented; block-bootstrap-of-historical and regime-switching return models are not yet available as selectable options.' },
       ],
+      buildForm(container) {
+        const C = global.WISControls;
+        const WEIGHT_PRESETS = {
+          conservative: { accumulationWeights: { Equity: 0.35, Debt: 0.50, Gold: 0.10, Cash: 0.05, International: 0 }, decumulationWeights: { Equity: 0.20, Debt: 0.65, Gold: 0.10, Cash: 0.05, International: 0 } },
+          balanced: { accumulationWeights: { Equity: 0.65, Debt: 0.25, Gold: 0.05, Cash: 0.05, International: 0 }, decumulationWeights: { Equity: 0.35, Debt: 0.50, Gold: 0.10, Cash: 0.05, International: 0 } },
+          growth: { accumulationWeights: { Equity: 0.80, Debt: 0.10, Gold: 0.05, Cash: 0.05, International: 0 }, decumulationWeights: { Equity: 0.50, Debt: 0.35, Gold: 0.10, Cash: 0.05, International: 0 } },
+        };
+        let state = {
+          currentCorpus: 5000000, accumulationYears: 15, decumulationYears: 25, monthlyContribution: 25000,
+          annualWithdrawal: 420000, inflationMean: 0.06, inflationVol: 0.015, ...WEIGHT_PRESETS.balanced,
+          shockProbability: 0.03, shockSize: 300000, pathCount: 3000, targetSuccessProbability: 0.85,
+        };
+        let riskPreset = 'balanced';
+
+        container.appendChild(el('div', 'panel-title', 'Your Plan'));
+        const grid = el('div', 'form-grid');
+        const corpusField = C.numberInput({ value: state.currentCorpus, step: 100000, prefix: '₹', onChange: (v) => { state.currentCorpus = v || 0; } });
+        grid.appendChild(C.field('Current Investable Corpus', corpusField, 'What you have invested today, at the start of the simulation.'));
+
+        const contribField = C.numberInput({ value: state.monthlyContribution, step: 1000, prefix: '₹', onChange: (v) => { state.monthlyContribution = v || 0; } });
+        grid.appendChild(C.field('Monthly Contribution (accumulation)', contribField, 'How much you add every month until retirement.'));
+
+        const withdrawField = C.numberInput({ value: state.annualWithdrawal, step: 10000, prefix: '₹', onChange: (v) => { state.annualWithdrawal = v || 0; } });
+        grid.appendChild(C.field('Annual Withdrawal (retirement, today\'s ₹)', withdrawField, 'How much you plan to spend per year in retirement, in today\'s rupees — the simulation inflates this forward each year.'));
+
+        const accYearsField = C.sliderInput({ value: state.accumulationYears, min: 1, max: 40, step: 1, format: (v) => v + ' yrs', onChange: (v) => { state.accumulationYears = v; } });
+        grid.appendChild(C.field('Years Until Retirement', accYearsField, 'Length of the accumulation phase (still contributing, not yet withdrawing).'));
+
+        const decYearsField = C.sliderInput({ value: state.decumulationYears, min: 1, max: 40, step: 1, format: (v) => v + ' yrs', onChange: (v) => { state.decumulationYears = v; } });
+        grid.appendChild(C.field('Years In Retirement', decYearsField, 'Length of the decumulation phase (withdrawing, not contributing) — plan for a long life expectancy.'));
+
+        const riskField = C.selectInput({ value: riskPreset, options: [{ value: 'conservative', label: 'Conservative' }, { value: 'balanced', label: 'Balanced' }, { value: 'growth', label: 'Growth' }], onChange: (v) => { riskPreset = v; Object.assign(state, WEIGHT_PRESETS[v]); } });
+        grid.appendChild(C.field('Investment Style', riskField, 'A preset asset-class mix for the accumulation and (more conservative) decumulation phases. Conservative/Balanced/Growth roughly track risk categories 2/3/4.'));
+
+        const targetField = C.sliderInput({ value: state.targetSuccessProbability * 100, min: 50, max: 95, step: 5, format: (v) => v + '%', onChange: (v) => { state.targetSuccessProbability = v / 100; } });
+        grid.appendChild(C.field('Target Success Probability', targetField, 'The confidence level used to solve the Safe Withdrawal Rate below — higher targets produce a more conservative (lower) safe withdrawal rate.'));
+
+        const pathField = C.selectInput({ value: String(state.pathCount), options: [{ value: '1000', label: '1,000 (fastest)' }, { value: '3000', label: '3,000 (default)' }, { value: '5000', label: '5,000' }, { value: '10000', label: '10,000 (spec minimum, slower)' }], onChange: (v) => { state.pathCount = Number(v); } });
+        grid.appendChild(C.field('Simulation Paths', pathField, 'More paths = more statistically reliable percentiles, at the cost of longer run time. FR-MC-01 calls for at least 10,000.'));
+        container.appendChild(grid);
+
+        container.appendChild(el('div', 'panel-title', 'Shocks & Inflation'));
+        const grid2 = el('div', 'form-grid');
+        const inflField = C.sliderInput({ value: state.inflationMean * 100, min: 2, max: 10, step: 0.5, format: (v) => v + '%', onChange: (v) => { state.inflationMean = v / 100; } });
+        grid2.appendChild(C.field('Average Inflation', inflField, 'Mean annual inflation used to grow your withdrawal amount each year in retirement.'));
+        const shockProbField = C.sliderInput({ value: state.shockProbability * 100, min: 0, max: 15, step: 1, format: (v) => v + '%', onChange: (v) => { state.shockProbability = v / 100; } });
+        grid2.appendChild(C.field('Annual Shock Probability', shockProbField, 'Chance, each year in retirement, of an unplanned lump-sum expense (medical, etc.).'));
+        const shockSizeField = C.numberInput({ value: state.shockSize, step: 50000, prefix: '₹', onChange: (v) => { state.shockSize = v || 0; } });
+        grid2.appendChild(C.field('Shock Size', shockSizeField, 'Size of that unplanned expense, in today\'s rupees, when it occurs.'));
+        container.appendChild(grid2);
+
+        return {
+          getData: () => ({ ...state }),
+          setData: (json) => {
+            state = { ...state, ...json };
+            corpusField.setValue(state.currentCorpus);
+            contribField.setValue(state.monthlyContribution);
+            withdrawField.setValue(state.annualWithdrawal);
+            accYearsField.setValue(state.accumulationYears);
+            decYearsField.setValue(state.decumulationYears);
+            targetField.setValue(state.targetSuccessProbability * 100);
+            inflField.setValue(state.inflationMean * 100);
+            shockProbField.setValue(state.shockProbability * 100);
+            shockSizeField.setValue(state.shockSize);
+          },
+        };
+      },
       render(container, data) {
         container.innerHTML = '';
+        const C = global.WISControls;
+        const verdict = el('div', 'panel');
+        verdict.style.display = 'flex'; verdict.style.gap = '20px'; verdict.style.alignItems = 'center';
+        const gaugeWrap = el('div');
+        if (C) gaugeWrap.appendChild(C.gauge(data.successProbability * 100, { subLabel: 'success prob.' }));
+        verdict.appendChild(gaugeWrap);
+        const verdictText = el('div');
+        const verdictWord = data.successProbability >= 0.8 ? 'on track' : data.successProbability >= 0.5 ? 'at moderate risk' : 'at high risk';
+        verdictText.innerHTML = `<div style="font-size:16px;font-weight:700;margin-bottom:6px;">This plan is ${verdictWord}</div>
+          <div style="font-size:13px;line-height:1.6;color:var(--text-muted);">Across ${data.runManifest.pathCount.toLocaleString()} simulated futures, this plan avoids running out of money in <strong>${fmtPct(data.successProbability)}</strong> of them.
+          A withdrawal rate of <strong>${fmtPct(data.safeWithdrawalRate, 2)}</strong> of the retirement-date corpus would keep that success chance at your ${fmtPct(0.85, 0)} target.
+          The plan is <strong>${fmtPct(Math.abs(data.sequenceRiskDelta), 1)} ${data.sequenceRiskDelta >= 0 ? 'more' : 'less'} likely to succeed</strong> if bad market years happen late rather than early in retirement (sequence-of-returns risk).</div>`;
+        verdict.appendChild(verdictText);
+        container.appendChild(verdict);
+
         const metrics = el('div', 'metric-row');
         const successCard = metricCard('Plan Success Probability', fmtPct(data.successProbability), null,
           `Share of ${data.runManifest.pathCount.toLocaleString()} simulated lifetime paths where the corpus never hit zero before the plan horizon ended (FR-MC-03). This is a direct count, not an estimate.`);
@@ -272,9 +651,102 @@
           requirement: 'Support transaction-cost-aware and turnover-constrained optimisation.',
           achieved: 'Turnover-constrained optimisation is implemented (turnoverCap penalises solutions exceeding your cap). Gap: transaction cost is only estimated after the optimum is found, not fed into the optimization objective itself — so the optimizer is turnover-aware but not yet fully cost-aware during the solve.' },
       ],
+      buildForm(container) {
+        const C = global.WISControls;
+        const UNIVERSE_OPTIONS = [
+          ['RELIANCE', 'Reliance Industries'], ['TCS', 'Tata Consultancy Services'], ['HDFCBANK', 'HDFC Bank'], ['INFY', 'Infosys'],
+          ['ICICIBANK', 'ICICI Bank'], ['HINDUNILVR', 'Hindustan Unilever'], ['ITC', 'ITC Ltd'], ['LT', 'Larsen & Toubro'],
+          ['BHARTIARTL', 'Bharti Airtel'], ['SUNPHARMA', 'Sun Pharma'], ['NIFTYBEES', 'Nifty 50 ETF'], ['GOLDBEES', 'Gold ETF'], ['LIQUIDBEES', 'Liquid / Debt Fund'],
+        ];
+        let state = {
+          objective: 'maxSharpe', riskFreeRate: 0.065, shrinkageIntensity: 0.3, useBlackLitterman: true,
+          views: [{ assetId: 'TCS', viewReturn: 0.16, confidence: 0.6 }],
+          sectorCaps: { IT: 0.30, Financials: 0.30 }, boxMax: 0.25, riskAversion: 3, turnoverCap: null,
+          currentHoldings: { RELIANCE: 0.12, TCS: 0.08, HDFCBANK: 0.15, NIFTYBEES: 0.20, GOLDBEES: 0.05, LIQUIDBEES: 0.10 },
+          transactionCostBps: 15,
+        };
+
+        container.appendChild(el('div', 'panel-title', 'Optimization Settings'));
+        const grid = el('div', 'form-grid');
+        const objField = C.selectInput({ value: state.objective, options: [{ value: 'maxSharpe', label: 'Maximise Sharpe Ratio' }, { value: 'minVariance', label: 'Minimise Variance' }], onChange: (v) => { state.objective = v; } });
+        grid.appendChild(C.field('Objective (Markowitz)', objField, 'What the optimizer solves for. "Max Sharpe" balances return against risk; "Min Variance" minimises risk regardless of return. The Efficient Frontier chart shows the full range either way.'));
+
+        const rfField = C.sliderInput({ value: state.riskFreeRate * 100, min: 2, max: 10, step: 0.25, format: (v) => v + '%', onChange: (v) => { state.riskFreeRate = v / 100; } });
+        grid.appendChild(C.field('Risk-Free Rate', rfField, 'Used in the Sharpe ratio calculation: (return − risk-free) ÷ volatility.'));
+
+        const shrinkField = C.sliderInput({ value: state.shrinkageIntensity * 100, min: 0, max: 100, step: 5, format: (v) => v + '%', onChange: (v) => { state.shrinkageIntensity = v / 100; } });
+        grid.appendChild(C.field('Covariance Shrinkage (Ledoit-Wolf)', shrinkField, 'How much the raw historical covariance is pulled toward a stable diagonal target. 0% = raw sample covariance (noisy); 100% = fully diagonal (ignores correlation). Stabilises the optimizer against estimation error.'));
+
+        const blField = C.toggleInput({ checked: state.useBlackLitterman, labelOn: 'Enabled', labelOff: 'Disabled', onChange: (v) => { state.useBlackLitterman = v; } });
+        grid.appendChild(C.field('Black-Litterman Blending', blField, 'When enabled, blends the house-view return estimates with your view below (weighted by confidence) before optimizing, instead of using house-view returns directly.'));
+        container.appendChild(grid);
+
+        container.appendChild(el('div', 'panel-title', 'Your View (for Black-Litterman)'));
+        const grid1b = el('div', 'form-grid');
+        const viewSecField = C.selectInput({ value: state.views[0].assetId, options: UNIVERSE_OPTIONS.map(([v, l]) => ({ value: v, label: l })), onChange: (v) => { state.views[0].assetId = v; } });
+        grid1b.appendChild(C.field('Security', viewSecField, 'The security your view applies to.'));
+        const viewRetField = C.sliderInput({ value: state.views[0].viewReturn * 100, min: 0, max: 30, step: 1, format: (v) => v + '%', onChange: (v) => { state.views[0].viewReturn = v / 100; } });
+        grid1b.appendChild(C.field('Your Expected Return', viewRetField, 'What you believe this security\'s annual return will be, overriding the house view proportionally to your confidence below.'));
+        const viewConfField = C.sliderInput({ value: state.views[0].confidence * 100, min: 5, max: 100, step: 5, format: (v) => v + '%', onChange: (v) => { state.views[0].confidence = v / 100; } });
+        grid1b.appendChild(C.field('Confidence', viewConfField, 'How strongly your view should pull the blended return away from the house-view equilibrium.'));
+        container.appendChild(grid1b);
+
+        container.appendChild(el('div', 'panel-title', 'Constraints'));
+        const grid2 = el('div', 'form-grid');
+        const boxField = C.sliderInput({ value: state.boxMax * 100, min: 5, max: 50, step: 5, format: (v) => v + '%', onChange: (v) => { state.boxMax = v / 100; } });
+        grid2.appendChild(C.field('Max Weight per Security', boxField, 'No single holding can exceed this share of the portfolio.'));
+        const itCapField = C.sliderInput({ value: (state.sectorCaps.IT || 0) * 100, min: 0, max: 60, step: 5, format: (v) => v + '%', onChange: (v) => { state.sectorCaps.IT = v / 100; } });
+        grid2.appendChild(C.field('IT Sector Cap', itCapField, 'Maximum combined weight across all IT-sector holdings (TCS, Infosys).'));
+        const finCapField = C.sliderInput({ value: (state.sectorCaps.Financials || 0) * 100, min: 0, max: 60, step: 5, format: (v) => v + '%', onChange: (v) => { state.sectorCaps.Financials = v / 100; } });
+        grid2.appendChild(C.field('Financials Sector Cap', finCapField, 'Maximum combined weight across all Financials-sector holdings (HDFC Bank, ICICI Bank).'));
+        const riskAvField = C.sliderInput({ value: state.riskAversion, min: 1, max: 10, step: 0.5, format: (v) => v.toFixed(1), onChange: (v) => { state.riskAversion = v; } });
+        grid2.appendChild(C.field('Risk Aversion (λ)', riskAvField, 'Higher values penalise variance more heavily inside the "Max Sharpe" objective, pulling the solution toward lower-risk holdings.'));
+        const costField = C.numberInput({ value: state.transactionCostBps, step: 1, suffix: 'bps', onChange: (v) => { state.transactionCostBps = v || 0; } });
+        grid2.appendChild(C.field('Transaction Cost', costField, 'Estimated cost per unit of trade, in basis points — used to estimate the cost of the trade list below.'));
+        container.appendChild(grid2);
+
+        container.appendChild(el('div', 'panel-title', 'Current Holdings (your starting portfolio)'));
+        container.appendChild(el('p', null, '<span style="color:var(--text-muted);font-size:12.5px">Used to compute turnover and the trade list — how far the optimal portfolio is from what you hold today.</span>'));
+        const holdingsGrid = el('div', 'form-grid');
+        const holdingFields = {};
+        UNIVERSE_OPTIONS.forEach(([id, name]) => {
+          const f = C.numberInput({ value: Math.round((state.currentHoldings[id] || 0) * 1000) / 10, step: 0.5, suffix: '%', onChange: (v) => { state.currentHoldings[id] = (v || 0) / 100; } });
+          holdingFields[id] = f;
+          holdingsGrid.appendChild(C.field(name, f));
+        });
+        container.appendChild(holdingsGrid);
+
+        return {
+          getData: () => JSON.parse(JSON.stringify(state)),
+          setData: (json) => {
+            state = JSON.parse(JSON.stringify(json));
+            objField.value = state.objective;
+            rfField.setValue(state.riskFreeRate * 100);
+            shrinkField.setValue(state.shrinkageIntensity * 100);
+            viewSecField.value = state.views[0].assetId;
+            viewRetField.setValue(state.views[0].viewReturn * 100);
+            viewConfField.setValue(state.views[0].confidence * 100);
+            boxField.setValue(state.boxMax * 100);
+            itCapField.setValue((state.sectorCaps.IT || 0) * 100);
+            finCapField.setValue((state.sectorCaps.Financials || 0) * 100);
+            riskAvField.setValue(state.riskAversion);
+            costField.setValue(state.transactionCostBps);
+            UNIVERSE_OPTIONS.forEach(([id]) => holdingFields[id].setValue(Math.round((state.currentHoldings[id] || 0) * 1000) / 10));
+          },
+        };
+      },
       render(container, data) {
         container.innerHTML = '';
         const m = data.riskMetrics;
+
+        const modelBadges = el('div', 'uc-fr-list');
+        modelBadges.style.marginBottom = '16px';
+        modelBadges.innerHTML = `
+          <span class="fr-chip must">Markowitz mean-variance</span>
+          ${data.muUsed === 'black-litterman-blended' ? '<span class="fr-chip must">Black-Litterman blending</span>' : '<span class="fr-chip">Black-Litterman: off</span>'}
+          <span class="fr-chip must">Ledoit-Wolf-style shrinkage</span>`;
+        container.appendChild(modelBadges);
+
         const metrics = el('div', 'metric-row');
         metrics.appendChild(metricCard('Expected Return', fmtPct(m.expectedReturn), null,
           'Weighted-average expected return of the optimal portfolio: Σ(weight × expected return), using the return estimates shown as "muUsed" below (house view, or Black-Litterman-blended if enabled).'));
@@ -306,7 +778,7 @@
         const p2 = el('div', 'panel');
         p2.id = 'panel-uc3-frontier';
         p2.appendChild(panelTitle('Efficient Frontier',
-          'Each point is a separate constrained optimization solved for a different target return, sweeping from the universe\'s lowest to highest expected return (FR-MV-05) — 13 real re-solves, not interpolated or decorative points.'));
+          'Each point is a separate constrained optimization solved for a different target return, sweeping from the universe\'s lowest to highest expected return (FR-MV-05) — 13 real re-solves, not interpolated or decorative points. Hover a point to see its exact return/risk.'));
         const cw2 = el('div', 'chart-wrap');
         p2.appendChild(cw2);
         two.appendChild(p2);
@@ -315,11 +787,74 @@
         barChart(cw1, data.optimalWeights.filter((w) => w.weight > 0.001).map((w) => ({ label: w.security, value: w.weight })), { valueFormatter: fmtPct, max: Math.max(...data.optimalWeights.map((w) => w.weight)) });
         frontierChart(cw2, data.efficientFrontier, data.currentPortfolio, { risk: m.volatility, return: m.expectedReturn });
 
+        // ---- Editable weights + live client-side recompute (no server round-trip needed) ----
+        const p1b = el('div', 'panel');
+        p1b.appendChild(panelTitle('Adjust Weights & See the Effect',
+          'This is a system-optimised starting point, not a mandate — edit any weight below and click Recalculate to see the resulting expected return / volatility / Sharpe for your own mix, computed instantly from the same return & risk model (no re-solve, just evaluated directly for your numbers).'));
+        const editGrid = el('div', 'form-grid');
+        const editedWeights = {};
+        data.optimalWeights.forEach((w) => {
+          const input = document.createElement('input');
+          input.type = 'number'; input.className = 'ui-input'; input.step = '0.5';
+          input.value = Math.round(w.weight * 1000) / 10;
+          editedWeights[w.security] = w.weight;
+          input.addEventListener('input', () => { editedWeights[w.security] = (Number(input.value) || 0) / 100; });
+          const wrap = document.createElement('div'); wrap.className = 'input-affix-wrap';
+          wrap.appendChild(input); wrap.appendChild(el('span', 'input-affix', '%'));
+          editGrid.appendChild(C_field(w.security, wrap));
+        });
+        p1b.appendChild(editGrid);
+        const customResult = el('div', 'metric-row');
+        customResult.style.marginTop = '14px';
+        p1b.appendChild(customResult);
+        const recalcBtn = el('button', 'btn btn-accent', 'Recalculate Stats for My Weights');
+        recalcBtn.style.marginTop = '4px';
+        recalcBtn.addEventListener('click', () => {
+          const order = data.universe.map((u) => u.id);
+          const wArr = order.map((id) => editedWeights[id] || 0);
+          const sum = wArr.reduce((a, b) => a + b, 0) || 1;
+          const wNorm = wArr.map((v) => v / sum);
+          const ret = wNorm.reduce((s, wi, i) => s + wi * data.mu[i], 0);
+          let variance = 0;
+          for (let i = 0; i < wNorm.length; i++) for (let j = 0; j < wNorm.length; j++) variance += wNorm[i] * wNorm[j] * data.covariance[i][j];
+          const vol = Math.sqrt(Math.max(variance, 0));
+          const sharpe = vol > 0 ? (ret - data.riskFreeRate) / vol : 0;
+          customResult.innerHTML = '';
+          customResult.appendChild(metricCard('Your Weights — Return', fmtPct(ret)));
+          customResult.appendChild(metricCard('Your Weights — Volatility', fmtPct(vol)));
+          customResult.appendChild(metricCard('Your Weights — Sharpe', sharpe.toFixed(2)));
+          customResult.appendChild(metricCard('Weights Summed To', fmtPct(sum), sum < 0.98 || sum > 1.02 ? 'renormalised to 100% for the calc above' : null));
+        });
+        p1b.appendChild(recalcBtn);
+        container.appendChild(p1b);
+
+        const FACTOR_INFO = {
+          value: { label: 'Value', desc: 'Cheapness vs. fundamentals (P/E, P/B style).' },
+          quality: { label: 'Quality', desc: 'Profitability & balance-sheet strength.' },
+          momentum: { label: 'Momentum', desc: 'Recent price trend / outperformance.' },
+          size: { label: 'Size', desc: 'Larger-cap (positive) vs. smaller-cap (negative) tilt.' },
+          lowvol: { label: 'Low Volatility', desc: 'Historical return steadiness.' },
+        };
         const p3 = el('div', 'panel');
         p3.id = 'panel-uc3-factors';
-        p3.appendChild(panelTitle('Factor Report',
-          'Weighted-average factor loading of the optimal portfolio: Σ(weight × security\'s factor score) per factor (FR-MV-04). Positive = tilted toward that factor; these are illustrative factor scores, not licensed fundamentals-derived loadings.'));
-        p3.appendChild(table(['Factor', 'Portfolio Exposure'], Object.entries(data.factorReport).map(([k, v]) => [k, v.toFixed(2)])));
+        p3.appendChild(panelTitle('Factor Report — In Plain Language',
+          'Weighted-average factor loading of the optimal portfolio: Σ(weight × security\'s factor score) per factor (FR-MV-04), shown on a diverging scale so "tilted toward" vs "tilted away from" is visually obvious. These are illustrative factor scores, not licensed fundamentals-derived loadings — see the note banner.'));
+        Object.entries(data.factorReport).forEach(([k, v]) => {
+          const info = FACTOR_INFO[k] || { label: k, desc: '' };
+          const row = el('div', 'factor-row');
+          row.appendChild(el('div', 'factor-label', info.label));
+          const track = el('div', 'factor-track');
+          const fill = el('div', 'factor-fill');
+          const pct = Math.min(Math.abs(v) / 2, 1) * 50;
+          if (v >= 0) { fill.style.left = '50%'; fill.style.width = pct + '%'; fill.style.background = 'var(--accent-2)'; }
+          else { fill.style.left = (50 - pct) + '%'; fill.style.width = pct + '%'; fill.style.background = '#94a3b3'; }
+          track.appendChild(fill);
+          row.appendChild(track);
+          row.appendChild(el('div', 'factor-desc', info.desc));
+          const verdict = Math.abs(v) < 0.1 ? 'Neutral' : v > 0 ? 'Tilted toward' : 'Tilted away from';
+          row.appendChild(el('div', 'factor-value', `${verdict} (${v.toFixed(2)})`));
+          p3.appendChild(row);
+        });
         container.appendChild(p3);
 
         const p4 = el('div', 'panel');
@@ -330,6 +865,13 @@
           t.name, tag(t.side, t.side === 'BUY' ? 'buy' : 'sell'), fmtPct(t.currentWeight), fmtPct(t.targetWeight), fmtPct(t.delta), t.estimatedCostBps.toFixed(1),
         ])));
         container.appendChild(p4);
+
+        function C_field(label, controlEl) {
+          const wrap = el('div', 'form-field');
+          wrap.appendChild(el('div', 'form-field-label', label));
+          wrap.appendChild(controlEl);
+          return wrap;
+        }
       },
     },
 
@@ -357,8 +899,77 @@
           requirement: 'Respect no-trade bands, lot sizes and minimum trade thresholds to avoid churn.',
           achieved: 'Minimum trade thresholds (minTradeValue) are enforced — trades below this size are skipped. Gap: lot-size rounding (e.g. tradeable board lots) is not enforced; trade quantities can be fractional.' },
       ],
-      render(container, data) {
+      buildForm(container) {
+        const C = global.WISControls;
+        let state = { lots: [], targetWeights: {}, driftBandAbs: 0.05, driftBandRel: 0.20, policy: 'threshold', cashflow: 50000, transactionCostBps: 10, minTradeValue: 5000 };
+        container.appendChild(el('div', 'panel-title', 'Portfolio & Rebalancing Policy'));
+
+        const grid = el('div', 'form-grid');
+        const bandField = C.sliderInput({ value: state.driftBandAbs * 100, min: 1, max: 15, step: 1, format: (v) => v + '%', onChange: (v) => { state.driftBandAbs = v / 100; } });
+        grid.appendChild(C.field('Drift Band (absolute)', bandField, 'A security is flagged BREACH if its actual weight is more than this many percentage points away from target. Requirement default: 5%.'));
+
+        const relField = C.sliderInput({ value: state.driftBandRel * 100, min: 5, max: 50, step: 5, format: (v) => v + '%', onChange: (v) => { state.driftBandRel = v / 100; } });
+        grid.appendChild(C.field('Drift Band (relative)', relField, 'Also flags a breach if drift exceeds this % of the target weight itself — catches small-weight positions that have doubled or halved even if the absolute gap is small.'));
+
+        const policyField = C.selectInput({ value: state.policy, options: [{ value: 'threshold', label: 'Threshold (only rebalance on breach)' }, { value: 'calendar', label: 'Calendar (always rebalance on schedule)' }], onChange: (v) => { state.policy = v; } });
+        grid.appendChild(C.field('Rebalancing Policy', policyField, 'Threshold: only breached securities are ever touched. Calendar: always runs, but still only trades securities that are breached at the time it runs.'));
+
+        const cashField = C.numberInput({ value: state.cashflow, step: 1000, prefix: '₹', onChange: (v) => { state.cashflow = v || 0; } });
+        grid.appendChild(C.field('Incoming Cashflow', cashField, 'New contribution available to invest. Used first to top up underweight-breached securities before any sell-side trade is generated (cash-flow-first, FR-RB-04).'));
+
+        const costField = C.numberInput({ value: state.transactionCostBps, step: 1, suffix: 'bps', onChange: (v) => { state.transactionCostBps = v || 0; } });
+        grid.appendChild(C.field('Transaction Cost', costField, 'Estimated brokerage/impact cost per trade, in basis points of trade value.'));
+
+        const minField = C.numberInput({ value: state.minTradeValue, step: 500, prefix: '₹', onChange: (v) => { state.minTradeValue = v || 0; } });
+        grid.appendChild(C.field('Minimum Trade Size', minField, 'Trades smaller than this are skipped entirely, to avoid needless churn on tiny gaps (FR-RB-06).'));
+        container.appendChild(grid);
+
+        container.appendChild(el('div', 'panel-title', 'Target Weights by Security'));
+        container.appendChild(el('p', null, '<span style="color:var(--text-muted);font-size:12.5px">Loaded from your current holdings. Edit any target weight below — the drift check and trade list will use these values.</span>'));
+        const weightsGrid = el('div', 'form-grid');
+        container.appendChild(weightsGrid);
+        const weightFields = {};
+
+        function rebuildWeightFields() {
+          weightsGrid.innerHTML = '';
+          Object.keys(state.targetWeights).forEach((sec) => {
+            const f = C.numberInput({ value: Math.round(state.targetWeights[sec] * 1000) / 10, step: 0.5, suffix: '%', onChange: (v) => { state.targetWeights[sec] = (v || 0) / 100; } });
+            weightFields[sec] = f;
+            weightsGrid.appendChild(C.field(sec, f));
+          });
+        }
+
+        return {
+          getData: () => ({ ...state, lots: state.lots }),
+          setData: (json) => {
+            state = { ...state, ...json, targetWeights: { ...json.targetWeights } };
+            bandField.setValue(state.driftBandAbs * 100);
+            relField.setValue(state.driftBandRel * 100);
+            cashField.setValue(state.cashflow);
+            costField.setValue(state.transactionCostBps);
+            minField.setValue(state.minTradeValue);
+            rebuildWeightFields();
+          },
+        };
+      },
+      render(container, data, ctx) {
         container.innerHTML = '';
+        const breachedCount = data.driftAlerts.filter((d) => d.breach).length;
+        const okCount = data.driftAlerts.length - breachedCount;
+
+        const scopeBanner = el('div', 'alert-banner' + (breachedCount ? '' : ' ok'));
+        scopeBanner.innerHTML = `<span class="alert-icon">${breachedCount ? '⚠️' : '✅'}</span><span class="alert-text"><strong>${breachedCount} of ${data.driftAlerts.length} holdings breached</strong> their drift band and are being rebalanced below. The other ${okCount} are within band and left untouched — unlike M4-UC3 (which can re-optimise the whole portfolio any time), this engine only ever acts on breached positions.</span>`;
+        container.appendChild(scopeBanner);
+
+        if (breachedCount > 0 && global.WISControls) {
+          global.WISControls.showModal({
+            icon: '⚠️',
+            title: 'Portfolio drift detected',
+            bodyHtml: `<p><strong>${breachedCount} holding${breachedCount > 1 ? 's have' : ' has'}</strong> drifted beyond the ${fmtPct(data.driftAlerts[0].band)} band and need${breachedCount > 1 ? '' : 's'} rebalancing.</p><p>A prioritised, tax-aware trade list has been generated below — review it and adjust target weights if needed before acting.</p>`,
+            actions: [{ label: 'Review Recommendation', className: 'btn-accent' }],
+          });
+        }
+
         const metrics = el('div', 'metric-row');
         const trigCard = metricCard('Rebalance Triggered', data.rebalanceTriggered ? 'Yes' : 'No', null,
           `Policy = "${data.policy}". Under "threshold" this fires only if any security's drift breaches its band; under "calendar" it always fires on this scheduled check (FR-RB-02).`);
@@ -374,21 +985,41 @@
           'Sum of transaction-cost estimates (trade amount × transactionCostBps) across every trade in the list — the friction cost of executing this rebalance.');
         costCard.id = 'm-uc4-cost';
         metrics.appendChild(costCard);
+        if (data.unallocatedCash > 0) {
+          metrics.appendChild(metricCard('Unallocated Cash', '₹' + fmtCompact(data.unallocatedCash), null,
+            'Cash left over after every breached underweight gap was fully closed — shown as "Cash (unallocated)" in the post-trade chart below so weights stay internally consistent (sum to 100%).'));
+        }
         container.appendChild(metrics);
 
         const p1 = el('div', 'panel');
         p1.id = 'panel-uc4-drift';
         p1.appendChild(panelTitle('Drift Alerts vs Target',
-          'Drift = current weight − target weight per security. Breach = |drift| exceeds your driftBandAbs, or the relative drift exceeds driftBandRel (FR-RB-01). Only breached securities generate sell-side trades below.'));
-        p1.appendChild(table(['Security', 'Current Wt', 'Target Wt', 'Drift', 'Breach'], data.driftAlerts.map((d) => [
-          d.security, fmtPct(d.currentWeight), fmtPct(d.targetWeight), fmtPct(d.drift), d.breach ? tag('BREACH', 'breach') : tag('OK', 'ok'),
-        ])));
+          'Drift = current weight − target weight per security. Breach = |drift| exceeds your driftBandAbs, or the relative drift exceeds driftBandRel (FR-RB-01). Only breached securities generate trades below. Target weights are editable here — adjust and click "Recalculate" to re-run with your changes.'));
+        const editedWeights = {};
+        p1.appendChild(table(['Security', 'Current Wt', 'Target Wt (editable)', 'Drift', 'Breach'], data.driftAlerts.map((d) => {
+          const input = document.createElement('input');
+          input.type = 'number'; input.className = 'ui-input'; input.style.width = '80px';
+          input.step = '0.5'; input.value = Math.round(d.targetWeight * 1000) / 10;
+          editedWeights[d.security] = d.targetWeight;
+          input.addEventListener('input', () => { editedWeights[d.security] = (Number(input.value) || 0) / 100; });
+          const inputWrap = el('div', null); inputWrap.appendChild(input); inputWrap.appendChild(el('span', null, ' %'));
+          return [d.security, fmtPct(d.currentWeight), inputWrap, fmtPct(d.drift), d.breach ? tag('BREACH', 'breach') : tag('OK', 'ok')];
+        })));
+        if (ctx && ctx.rerun && ctx.payload) {
+          const recalcBtn = el('button', 'btn btn-accent', 'Recalculate with Edited Targets');
+          recalcBtn.style.marginTop = '10px';
+          recalcBtn.addEventListener('click', () => {
+            ctx.payload.targetWeights = { ...editedWeights };
+            ctx.rerun();
+          });
+          p1.appendChild(recalcBtn);
+        }
         container.appendChild(p1);
 
         const p2 = el('div', 'panel');
         p2.id = 'panel-uc4-tradelist';
         p2.appendChild(panelTitle('Prioritised Trade List',
-          'Order of operations (FR-RB-04): (1) any incoming cashflow buys the most-underweight securities first, reducing sell-side need; (2) remaining overweight positions are trimmed, selling loss lots first, then long-term gains, then short-term gains last, to minimise realised tax.'));
+          'Order of operations (FR-RB-04): (1) any incoming cashflow buys the most-underweight breached securities first; (2) every breached-overweight position is trimmed (tax-aware lot order: losses, then long-term gains, then short-term gains last); (3) sale proceeds are redeployed into any still-remaining underweight-breached gap, so the portfolio\'s total value is conserved.'));
         if (data.tradeList.length) {
           p2.appendChild(table(['Security', 'Side', 'Amount', 'Source/Lot', 'Holding', 'Realised Gain', 'Tax'], data.tradeList.map((t) => [
             t.security, tag(t.side, t.side === 'BUY' ? 'buy' : 'sell'), '₹' + fmtCompact(t.amount),
@@ -402,19 +1033,23 @@
 
         const two = el('div', 'two-col');
         const p3 = el('div', 'panel');
-        p3.appendChild(panelTitle('Post-Trade Weights',
-          'Current weights with the trade list above applied (buys add value, sells subtract it), then renormalised to 100% — this is what the portfolio looks like immediately after execution, before any market movement.'));
+        p3.appendChild(panelTitle('Post-Trade Weights (target vs. achieved)',
+          'Current weights with the trade list above applied. Breached securities should land exactly on target (limited only by available cash/sell proceeds); non-breached securities are untouched by design. Any leftover cash after closing all gaps is shown as "Cash (unallocated)" so the bars always sum to 100%.'));
         const cw = el('div', 'chart-wrap');
         p3.appendChild(cw);
         two.appendChild(p3);
-        barChart(cw, Object.entries(data.postTradeWeights).map(([k, v]) => ({ label: k, value: v })), { valueFormatter: fmtPct, max: 1 });
+        barChart(cw, Object.entries(data.postTradeWeights).map(([k, v]) => ({ label: k, value: v, color: k === 'Cash (unallocated)' ? '#8b98a5' : undefined })), { valueFormatter: fmtPct, max: 1 });
 
         const p4 = el('div', 'panel');
         p4.appendChild(panelTitle('Tax-Deferred Alternative',
           'A lower-tax variant that keeps only the cash-flow-funded buys and skips every sell-side trade — for comparison against the primary trade list when you want to weigh "rebalance now" against "rebalance gradually via future contributions" (FR-RB-05).'));
         const alt = data.alternatives[0];
         p4.appendChild(el('p', null, alt.note));
-        p4.appendChild(table(['Security', 'Side', 'Amount'], alt.tradeList.map((t) => [t.security, tag(t.side, 'buy'), '₹' + fmtCompact(t.amount)])));
+        if (alt.tradeList.length) {
+          p4.appendChild(table(['Security', 'Side', 'Amount'], alt.tradeList.map((t) => [t.security, tag(t.side, 'buy'), '₹' + fmtCompact(t.amount)])));
+        } else {
+          p4.appendChild(el('div', 'empty-hint', 'No cash-flow-funded buys available this run'));
+        }
         two.appendChild(p4);
         container.appendChild(two);
       },
@@ -444,9 +1079,45 @@
           requirement: 'Respect minimum trade sizes and avoid degrading the portfolio\'s target allocation.',
           achieved: 'minHarvestableLoss acts as the minimum trade-size filter. Gap: "avoid degrading target allocation" is not enforced as an explicit guardrail — the allocationDelta output is reported but nothing currently blocks a harvest that would push the portfolio meaningfully off its target mix.' },
       ],
+      buildForm(container) {
+        const C = global.WISControls;
+        let state = { lots: [], realizedGainsYTD: { stcg: 0, ltcg: 0 }, washSaleWindowDays: 30, minHarvestableLoss: 1000, recentlyPurchased: [] };
+        container.appendChild(el('div', 'panel-title', 'Realised Gains This Year (available to offset)'));
+        const grid = el('div', 'form-grid');
+        const stcgField = C.numberInput({ value: state.realizedGainsYTD.stcg, step: 1000, prefix: '₹', onChange: (v) => { state.realizedGainsYTD.stcg = v || 0; } });
+        grid.appendChild(C.field('Short-Term Gains YTD', stcgField, 'Realised short-term capital gains already booked this financial year. Short-term losses can only offset against this bucket.'));
+        const ltcgField = C.numberInput({ value: state.realizedGainsYTD.ltcg, step: 1000, prefix: '₹', onChange: (v) => { state.realizedGainsYTD.ltcg = v || 0; } });
+        grid.appendChild(C.field('Long-Term Gains YTD', ltcgField, 'Realised long-term capital gains already booked this financial year. Long-term losses can only offset against this bucket.'));
+        container.appendChild(grid);
+
+        container.appendChild(el('div', 'panel-title', 'Harvesting Rules'));
+        const grid2 = el('div', 'form-grid');
+        const washField = C.numberInput({ value: state.washSaleWindowDays, step: 5, suffix: 'days', onChange: (v) => { state.washSaleWindowDays = v || 0; } });
+        grid2.appendChild(C.field('Wash-Sale Window', washField, 'A sold security cannot be repurchased within this many days without the loss being disallowed. This is the compliance rule that governs the timing of a harvest.'));
+        const minLossField = C.numberInput({ value: state.minHarvestableLoss, step: 500, prefix: '₹', onChange: (v) => { state.minHarvestableLoss = v || 0; } });
+        grid2.appendChild(C.field('Minimum Harvestable Loss', minLossField, 'Lots with an unrealised loss smaller than this are ignored, to avoid harvesting trivial amounts.'));
+        container.appendChild(grid2);
+        container.appendChild(el('p', null, '<span style="color:var(--text-muted);font-size:12.5px">Scans your current holdings (loaded from sample lots) for unrealised losses.</span>'));
+
+        return {
+          getData: () => ({ ...state }),
+          setData: (json) => {
+            state = { ...json, realizedGainsYTD: { ...json.realizedGainsYTD } };
+            stcgField.setValue(state.realizedGainsYTD.stcg);
+            ltcgField.setValue(state.realizedGainsYTD.ltcg);
+            washField.setValue(state.washSaleWindowDays);
+            minLossField.setValue(state.minHarvestableLoss);
+          },
+        };
+      },
       render(container, data) {
         container.innerHTML = '';
         const r = data.harvestReport;
+        const intro = el('div', 'note-box');
+        intro.style.background = '#eef2f7'; intro.style.borderColor = 'var(--border)'; intro.style.color = 'var(--text)';
+        intro.innerHTML = '<strong>Tax-loss harvesting is about timing:</strong> a loss is only useful if realised (sold) in the same window it can offset a matching-type gain. Short-term losses offset short-term gains only; long-term losses offset long-term gains only. The two tables below show exactly how much of each loss gets absorbed, and what capacity remains afterward.';
+        container.appendChild(intro);
+
         const metrics = el('div', 'metric-row');
         const foundCard = metricCard('Loss Lots Found', r.lossLotsFound, null,
           'Lots where (current price − cost basis) × quantity is negative and exceeds your minHarvestableLoss threshold, out of ' + r.lotsScanned + ' lots scanned (FR-TL-01).');
@@ -462,19 +1133,36 @@
         metrics.appendChild(alphaCard);
         container.appendChild(metrics);
 
+        function offsetTable(pairs, label, rateLabel) {
+          const p = el('div', 'panel');
+          p.appendChild(panelTitle(`${label} Losses → Offset Against ${rateLabel} Gains`,
+            `Each row shows how much of that lot's loss was actually absorbed by your available ${rateLabel} gains bucket (in tax-benefit-ranked order, FR-TL-01), and the "Remaining Capacity After" column is a running waterfall — once it hits ₹0, further losses of this type carry forward unoffset this year.`));
+          if (!pairs.length) {
+            p.appendChild(el('div', 'empty-hint', `No ${label.toLowerCase()} losses harvested`));
+          } else {
+            p.appendChild(table(
+              ['Security', 'Unrealised Loss', 'Offset Applied', 'Unoffset (carries fwd)', 'Tax Benefit', 'Remaining Capacity After', 'Replacement'],
+              pairs.map((pr) => [
+                pr.sellSecurity, '₹' + fmtCompact(pr.unrealizedLoss), '₹' + fmtCompact(pr.offsetApplied || 0),
+                pr.unoffsetAmount > 0 ? tag('₹' + fmtCompact(pr.unoffsetAmount), 'breach') : '₹0',
+                '₹' + fmtCompact(pr.taxBenefit), '₹' + fmtCompact(pr.remainingCapacityAfter || 0),
+                pr.replacement ? `${pr.replacement.name} (${fmtPct(pr.replacement.similarity)} similar)` : '-',
+              ])
+            ));
+          }
+          return p;
+        }
+
         const p1 = el('div', 'panel');
         p1.id = 'panel-uc5-pairs';
-        p1.appendChild(panelTitle('Sell / Replacement Pairs',
-          'Ranked by tax benefit (|loss| × applicable rate) per FR-TL-01. Replacement is the same-asset-class security with the highest factor-similarity score minus a tracking-error penalty, so the portfolio\'s risk/factor profile is preserved after the swap (FR-TL-02). Similarity/TE are illustrative proxies here — see the note banner above.'));
-        if (data.sellBuyPairs.length) {
-          p1.appendChild(table(['Sell', 'Loss', 'Holding', 'Tax Benefit', 'Replacement', 'Similarity', 'Tracking Error'], data.sellBuyPairs.map((p) => [
-            p.sellSecurity, '₹' + fmtCompact(p.unrealizedLoss), tag(p.holdingType, 'long'), '₹' + fmtCompact(p.taxBenefit),
-            p.replacement ? p.replacement.name : '-', p.replacement ? fmtPct(p.replacement.similarity) : '-', p.replacement ? p.replacement.trackingError : '-',
-          ])));
-        } else {
-          p1.appendChild(el('div', 'empty-hint', 'No harvestable losses above threshold'));
-        }
+        p1.appendChild(panelTitle('Short-Term vs Long-Term Offset Waterfall',
+          'Split by holding type because Indian tax rules only let a short-term loss offset a short-term gain (and likewise for long-term) — mixing them is not permitted, which is why this use case tracks the two buckets separately (FR-TL-02, FR-TL-04).'));
         container.appendChild(p1);
+
+        const stPairs = data.sellBuyPairs.filter((p) => p.holdingType === 'STCG');
+        const ltPairs = data.sellBuyPairs.filter((p) => p.holdingType === 'LTCG');
+        container.appendChild(offsetTable(stPairs, 'Short-Term', 'STCG'));
+        container.appendChild(offsetTable(ltPairs, 'Long-Term', 'LTCG'));
 
         const two = el('div', 'two-col');
         const p2 = el('div', 'panel');
@@ -490,7 +1178,7 @@
 
         const p3 = el('div', 'panel');
         p3.id = 'panel-uc5-capacity';
-        p3.appendChild(panelTitle('Harvest Capacity',
+        p3.appendChild(panelTitle('Harvest Capacity Remaining This Year',
           'Realised gains YTD (your input) minus the losses just harvested against each bucket — the offsettable gains remaining this year, tracked so future harvests don\'t double-count capacity (FR-TL-05).'));
         p3.appendChild(table(['Metric', 'Value'], [
           ['Remaining STCG offset', '₹' + fmtCompact(data.harvestCapacity.remainingSTCGOffset)],

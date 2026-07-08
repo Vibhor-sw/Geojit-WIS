@@ -544,11 +544,12 @@
       }),
     };
     return {
-      universe: universe.map((u) => ({ id: u.id, name: u.name, sector: u.sector })),
+      universe: universe.map((u) => ({ id: u.id, name: u.name, sector: u.sector, vol: u.vol })),
       optimalWeights: universe.map((u, i) => ({ security: u.id, weight: Number(optimalWeights[i].toFixed(4)) })),
       efficientFrontier, currentPortfolio: { return: currentStats.ret, risk: currentStats.vol }, factorReport, tradeList,
       riskMetrics: { expectedReturn: ret, volatility: vol, sharpe, diversificationRatio, turnover, estimatedCost },
       feasibility, muUsed: useBlackLitterman ? 'black-litterman-blended' : 'house-view-prior',
+      mu, covariance: Sigma, riskFreeRate,
     };
   }
 
@@ -577,7 +578,7 @@
   }
   function runRebalancing(input) {
     const {
-      lots = [], targetWeights = {}, driftBandAbs = 0.03, driftBandRel = 0.20, policy = 'threshold',
+      lots = [], targetWeights = {}, driftBandAbs = 0.05, driftBandRel = 0.20, policy = 'threshold',
       cashflow = 0, transactionCostBps = 10, minTradeValue = 5000, asOfDate = null,
     } = input;
     const { values, weights, total, bySecurity } = currentValueAndWeights(lots);
@@ -591,55 +592,67 @@
     }
     const anyBreach = driftAlerts.some((d) => d.breach);
     const rebalanceTriggered = policy === 'calendar' ? true : anyBreach;
-    const tradeList = []; let cashRemaining = cashflow; const newTotal = total + cashflow;
-    let taxImpact = { totalTax: 0, bucket: 'n/a' };
+    // Only ever touches breached securities (unlike M4-UC3, which considers the whole portfolio).
+    const tradeList = []; const newTotal = total + cashflow;
+    let taxImpactTotal = 0, unallocatedCash = 0;
     if (rebalanceTriggered) {
-      const underweights = driftAlerts.filter((d) => d.drift < 0).sort((a, b) => a.drift - b.drift);
-      for (const u of underweights) {
-        if (cashRemaining <= 0) break;
-        const targetValue = u.targetWeight * newTotal, currentValue = values[u.security] || 0;
-        const gap = Math.max(0, targetValue - currentValue);
-        const buyAmount = Math.min(gap, cashRemaining);
-        if (buyAmount >= minTradeValue) { tradeList.push({ security: u.security, side: 'BUY', amount: Math.round(buyAmount), source: 'cashflow', taxImpact: 0, estimatedCost: Math.round(buyAmount * transactionCostBps / 10000) }); cashRemaining -= buyAmount; }
+      const breachedUnderweight = driftAlerts
+        .filter((d) => d.breach && d.drift < 0)
+        .sort((a, b) => a.drift - b.drift)
+        .map((d) => ({ security: d.security, gap: Math.max(0, d.targetWeight * newTotal - (values[d.security] || 0)) }));
+      const breachedOverweight = driftAlerts.filter((d) => d.breach && d.drift > 0);
+
+      // Stage 1 (cash-flow-first): fund underweight-breached gaps from incoming cashflow.
+      let pool = cashflow;
+      for (const u of breachedUnderweight) {
+        if (pool <= 0 || u.gap <= 0) continue;
+        const buyAmount = Math.min(u.gap, pool);
+        if (buyAmount >= minTradeValue) { tradeList.push({ security: u.security, side: 'BUY', amount: Math.round(buyAmount), source: 'cashflow', taxImpact: 0, estimatedCost: Math.round(buyAmount * transactionCostBps / 10000) }); pool -= buyAmount; u.gap -= buyAmount; }
       }
-      let taxImpactTotal = 0;
-      for (const d of driftAlerts) {
-        if (!d.breach) continue;
+
+      // Stage 2: sell every breached-overweight position down to target; pool the proceeds (do not discard them).
+      for (const d of breachedOverweight) {
         const targetValue = d.targetWeight * newTotal, currentValue = values[d.security] || 0, gapValue = currentValue - targetValue;
-        if (gapValue > minTradeValue) {
-          const secLots = (bySecurity[d.security] || []).slice();
-          secLots.sort((a, b) => {
-            const glA = (a.currentPrice - a.costBasis), glB = (b.currentPrice - b.costBasis);
-            const scoreA = glA < 0 ? -1000 + glA : (lotTaxRate(a, asOfDate).isLongTerm ? 0 : 1000) + glA;
-            const scoreB = glB < 0 ? -1000 + glB : (lotTaxRate(b, asOfDate).isLongTerm ? 0 : 1000) + glB;
-            return scoreA - scoreB;
-          });
-          let remainingToSell = gapValue;
-          for (const lot of secLots) {
-            if (remainingToSell <= 0) break;
-            const lotValue = lot.qty * lot.currentPrice, sellValue = Math.min(lotValue, remainingToSell), sellQty = sellValue / lot.currentPrice;
-            const { isLongTerm, rate } = lotTaxRate(lot, asOfDate);
-            const gainPerUnit = lot.currentPrice - lot.costBasis, realizedGain = gainPerUnit * sellQty, tax = Math.max(0, realizedGain) * rate;
-            taxImpactTotal += tax;
-            tradeList.push({ security: d.security, side: 'SELL', amount: Math.round(sellValue), lotId: lot.id, holdingType: isLongTerm ? 'LTCG' : 'STCG', realizedGain: Math.round(realizedGain), taxImpact: Math.round(tax), estimatedCost: Math.round(sellValue * transactionCostBps / 10000) });
-            remainingToSell -= sellValue;
-          }
-        } else if (gapValue < -minTradeValue && cashRemaining > 0) {
-          const buyAmount = Math.min(-gapValue, cashRemaining);
-          if (buyAmount >= minTradeValue) { tradeList.push({ security: d.security, side: 'BUY', amount: Math.round(buyAmount), source: 'residual-cash', taxImpact: 0, estimatedCost: Math.round(buyAmount * transactionCostBps / 10000) }); cashRemaining -= buyAmount; }
+        if (gapValue <= minTradeValue) continue;
+        const secLots = (bySecurity[d.security] || []).slice();
+        secLots.sort((a, b) => {
+          const glA = (a.currentPrice - a.costBasis), glB = (b.currentPrice - b.costBasis);
+          const scoreA = glA < 0 ? -1000 + glA : (lotTaxRate(a, asOfDate).isLongTerm ? 0 : 1000) + glA;
+          const scoreB = glB < 0 ? -1000 + glB : (lotTaxRate(b, asOfDate).isLongTerm ? 0 : 1000) + glB;
+          return scoreA - scoreB;
+        });
+        let remainingToSell = gapValue;
+        for (const lot of secLots) {
+          if (remainingToSell <= 0) break;
+          const lotValue = lot.qty * lot.currentPrice, sellValue = Math.min(lotValue, remainingToSell), sellQty = sellValue / lot.currentPrice;
+          const { isLongTerm, rate } = lotTaxRate(lot, asOfDate);
+          const realizedGain = (lot.currentPrice - lot.costBasis) * sellQty, tax = Math.max(0, realizedGain) * rate;
+          taxImpactTotal += tax;
+          tradeList.push({ security: d.security, side: 'SELL', amount: Math.round(sellValue), lotId: lot.id, holdingType: isLongTerm ? 'LTCG' : 'STCG', realizedGain: Math.round(realizedGain), taxImpact: Math.round(tax), estimatedCost: Math.round(sellValue * transactionCostBps / 10000) });
+          remainingToSell -= sellValue;
+          pool += sellValue;
         }
       }
-      taxImpact = { totalTax: Math.round(taxImpactTotal), bucket: 'STCG+LTCG blended' };
+
+      // Stage 3: redeploy the combined pool (leftover cashflow + sell proceeds) into remaining underweight-breached gaps.
+      for (const u of breachedUnderweight) {
+        if (pool <= 0 || u.gap <= 0) continue;
+        const buyAmount = Math.min(u.gap, pool);
+        if (buyAmount >= minTradeValue) { tradeList.push({ security: u.security, side: 'BUY', amount: Math.round(buyAmount), source: 'sell-proceeds', taxImpact: 0, estimatedCost: Math.round(buyAmount * transactionCostBps / 10000) }); pool -= buyAmount; u.gap -= buyAmount; }
+      }
+      unallocatedCash = Math.round(pool);
     }
+    const taxImpact = { totalTax: Math.round(taxImpactTotal), bucket: rebalanceTriggered ? 'STCG+LTCG blended' : 'n/a' };
     const postValues = { ...values };
     for (const t of tradeList) postValues[t.security] = (postValues[t.security] || 0) + (t.side === 'BUY' ? t.amount : -t.amount);
-    const postTotal = Object.values(postValues).reduce((a, b) => a + b, 0) || 1;
+    const postTotal = Object.values(postValues).reduce((a, b) => a + b, 0) + unallocatedCash || 1;
     const postTradeWeights = {};
     for (const sec of allSecurities) postTradeWeights[sec] = Number(((postValues[sec] || 0) / postTotal).toFixed(4));
+    if (unallocatedCash > 0) postTradeWeights['Cash (unallocated)'] = Number((unallocatedCash / postTotal).toFixed(4));
     const costEstimate = tradeList.reduce((s, t) => s + (t.estimatedCost || 0), 0);
-    const alternativeTrades = tradeList.filter((t) => t.side === 'BUY');
+    const alternativeTrades = tradeList.filter((t) => t.side === 'BUY' && t.source === 'cashflow');
     return {
-      driftAlerts, rebalanceTriggered, tradeList, postTradeWeights, taxImpact, costEstimate,
+      driftAlerts, rebalanceTriggered, tradeList, postTradeWeights, unallocatedCash, taxImpact, costEstimate,
       alternatives: [{ label: 'Tax-deferred (cash-flow only, tolerate residual drift)', tradeList: alternativeTrades, taxImpact: 0, note: 'Skips sell-side trades; relies on future cashflows and a wider drift tolerance to converge over time.' }],
       policy, currentTotal: total, postTotal,
     };
@@ -686,6 +699,7 @@
       let offsetBucket = lot.isLongTerm ? 'ltcg' : 'stcg';
       const available = offsetBucket === 'ltcg' ? remainingLTCGOffset : remainingSTCGOffset;
       const offsetAmount = Math.min(Math.abs(lot.unrealizedLoss), Math.max(available, 0));
+      const unoffsetAmount = Math.abs(lot.unrealizedLoss) - offsetAmount;
       if (offsetBucket === 'ltcg') remainingLTCGOffset -= offsetAmount; else remainingSTCGOffset -= offsetAmount;
       if (lot.isLongTerm) harvestedLTCG += Math.abs(lot.unrealizedLoss); else harvestedSTCG += Math.abs(lot.unrealizedLoss);
       const candidates = UNIVERSE.filter((u) => u.id !== lot.security && u.assetClass === (sold ? sold.assetClass : u.assetClass));
@@ -695,7 +709,7 @@
         const score = similarityWeight * sim - teWeight * te - costWeight * 0.001;
         if (score > bestScore) { bestScore = score; best = { ...c, similarity: Number(sim.toFixed(3)), trackingError: te }; }
       }
-      sellBuyPairs.push({ sellLotId: lot.id, sellSecurity: lot.security, qty: lot.qty, unrealizedLoss: Math.round(lot.unrealizedLoss), holdingType: lot.isLongTerm ? 'LTCG' : 'STCG', taxBenefit: Math.round(lot.taxBenefit), replacement: best ? { security: best.id, name: best.name, similarity: best.similarity, trackingError: best.trackingError } : null });
+      sellBuyPairs.push({ sellLotId: lot.id, sellSecurity: lot.security, qty: lot.qty, unrealizedLoss: Math.round(lot.unrealizedLoss), holdingType: lot.isLongTerm ? 'LTCG' : 'STCG', taxBenefit: Math.round(lot.taxBenefit), offsetBucket, offsetApplied: Math.round(offsetAmount), unoffsetAmount: Math.round(unoffsetAmount), remainingCapacityAfter: Math.round(Math.max(offsetBucket === 'ltcg' ? remainingLTCGOffset : remainingSTCGOffset, 0)), replacement: best ? { security: best.id, name: best.name, similarity: best.similarity, trackingError: best.trackingError } : null });
     }
     const ytdTaxAlpha = Math.round(harvestedSTCG * TAX_RULES.equity.stcgRate + harvestedLTCG * TAX_RULES.equity.ltcgRate);
     const harvestReport = { lotsScanned: lots.length, lossLotsFound: lossLots.length, lossLotsHarvested: sellBuyPairs.length, totalRealizedLoss: Math.round(harvestedSTCG + harvestedLTCG), breakdown: { stcgLossHarvested: Math.round(harvestedSTCG), ltcgLossHarvested: Math.round(harvestedLTCG) } };
@@ -760,7 +774,7 @@
   function runRoboAdvisory(input) {
     const {
       riskQuestionnaire = { tolerance: [4, 3, 4], capacity: [3, 3, 4] }, goals = [], lots = [], cashflow = 0,
-      targetSuccessProbability = 0.80, driftBandAbs = 0.03, rmOverride = null, seed = 11,
+      targetSuccessProbability = 0.80, driftBandAbs = 0.05, rmOverride = null, seed = 11,
     } = input;
     const auditTrail = []; const now = new Date().toISOString();
     const riskScore = scoreQuestionnaire(riskQuestionnaire);
@@ -827,7 +841,7 @@
     uc4: {
       lots: SAMPLE_LOTS,
       targetWeights: { RELIANCE: 0.12, TCS: 0.10, HDFCBANK: 0.15, INFY: 0.08, ITC: 0.05, LT: 0.08, NIFTYBEES: 0.25, GOLDBEES: 0.07, LIQUIDBEES: 0.10 },
-      driftBandAbs: 0.03, driftBandRel: 0.20, policy: 'threshold', cashflow: 50000, transactionCostBps: 10, minTradeValue: 5000,
+      driftBandAbs: 0.05, driftBandRel: 0.20, policy: 'threshold', cashflow: 50000, transactionCostBps: 10, minTradeValue: 5000,
     },
     uc5: {
       lots: SAMPLE_LOTS, realizedGainsYTD: { stcg: 15000, ltcg: 40000 }, washSaleWindowDays: 30,

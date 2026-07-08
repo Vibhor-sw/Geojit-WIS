@@ -1,5 +1,6 @@
 // App shell: left-nav (Module 4 -> 7 sub-modules) + view switching.
 // Static build: models run entirely client-side via window.WISModels (see js/models.js) -- no backend/fetch.
+// Supports three input modes per use case: uc.customPage+renderPage, uc.buildForm, or a JSON textarea fallback.
 (function () {
   const USE_CASES = window.WISUseCases;
   const menuEl = document.getElementById('menu');
@@ -9,6 +10,17 @@
     key: 'module4',
     title: 'Module 4 — Portfolio Construction & Financial Planning',
     subtitle: 'Goal allocation, optimisation, rebalancing, tax & robo-advisory',
+  };
+
+  // ---- Data-access adapter: static build runs models directly in the browser. ----
+  const api = {
+    getSampleData: async (uc) => window.WISModels[uc.key].sample,
+    runModel: (uc, payload) => new Promise((resolve, reject) => {
+      // Defer to next tick so any "Running..." status paints before the synchronous, CPU-bound model runs.
+      setTimeout(() => {
+        try { resolve(window.WISModels[uc.key].run(payload)); } catch (err) { reject(err); }
+      }, 10);
+    }),
   };
 
   function buildSidebar() {
@@ -42,7 +54,6 @@
 
     menuEl.appendChild(moduleItem);
 
-    // Auto-expand on load so all sub-modules are visible immediately.
     header.classList.add('expanded');
     submenu.classList.add('expanded');
     header.classList.add('active');
@@ -62,10 +73,7 @@
     renderUseCaseShell(uc);
   }
 
-  function renderUseCaseShell(uc) {
-    contentEl.innerHTML = '';
-    const model = window.WISModels[uc.key];
-
+  function renderUseCaseHeader(uc) {
     const header = document.createElement('div');
     header.className = 'uc-header';
     header.innerHTML = `
@@ -80,15 +88,49 @@
     note.className = 'note-box';
     note.textContent = 'Running entirely in your browser on illustrative sample data (see js/models.js) — no backend, no data leaves this page. Replace with live vendor feeds (see Data-Source Mapping in the spec) before production use.';
     contentEl.appendChild(note);
+  }
+
+  function makeTourButton(uc) {
+    const tourBtn = document.createElement('button');
+    tourBtn.className = 'btn btn-tour';
+    tourBtn.textContent = '🧭 Guided Requirement Walkthrough';
+    tourBtn.disabled = true;
+    tourBtn.title = 'Run the model first, then walk through each requirement FR-by-FR against what\'s shown on screen.';
+    tourBtn.addEventListener('click', () => {
+      window.WISCoachmark.start(uc.tour, { tag: `${uc.tag} Requirement Walkthrough` });
+    });
+    return tourBtn;
+  }
+
+  function renderUseCaseShell(uc) {
+    contentEl.innerHTML = '';
+    renderUseCaseHeader(uc);
+
+    if (uc.customPage) {
+      const pageBody = document.createElement('div');
+      pageBody.id = 'input-panel';
+      contentEl.appendChild(pageBody);
+      uc.renderPage(pageBody, { ...api, uc, makeTourButton: () => makeTourButton(uc) });
+      return;
+    }
 
     const inputPanel = document.createElement('div');
     inputPanel.className = 'panel';
     inputPanel.id = 'input-panel';
-    inputPanel.innerHTML = `<div class="panel-title">Model Input (edit JSON, or load the bundled sample)</div>`;
-    const textarea = document.createElement('textarea');
-    textarea.className = 'json-input';
-    textarea.id = `input-${uc.key}`;
-    inputPanel.appendChild(textarea);
+    contentEl.appendChild(inputPanel);
+
+    let formApi = null;
+    let textarea = null;
+
+    if (uc.buildForm) {
+      formApi = uc.buildForm(inputPanel);
+    } else {
+      inputPanel.appendChild(Object.assign(document.createElement('div'), { className: 'panel-title', textContent: 'Model Input (edit JSON, or load the bundled sample)' }));
+      textarea = document.createElement('textarea');
+      textarea.className = 'json-input';
+      textarea.id = `input-${uc.key}`;
+      inputPanel.appendChild(textarea);
+    }
 
     const btnRow = document.createElement('div');
     btnRow.className = 'btn-row';
@@ -98,11 +140,7 @@
     const runBtn = document.createElement('button');
     runBtn.className = 'btn btn-accent';
     runBtn.textContent = 'Run Model';
-    const tourBtn = document.createElement('button');
-    tourBtn.className = 'btn btn-tour';
-    tourBtn.textContent = '🧭 Guided Requirement Walkthrough';
-    tourBtn.disabled = true;
-    tourBtn.title = 'Run the model first, then walk through each requirement FR-by-FR against what\'s shown on screen.';
+    const tourBtn = makeTourButton(uc);
     btnRow.appendChild(loadBtn);
     btnRow.appendChild(runBtn);
     btnRow.appendChild(tourBtn);
@@ -111,16 +149,16 @@
     const status = document.createElement('div');
     status.className = 'status-line';
     inputPanel.appendChild(status);
-    contentEl.appendChild(inputPanel);
 
     const resultsWrap = document.createElement('div');
     resultsWrap.className = 'results';
     resultsWrap.innerHTML = '<div class="empty-hint">Load the sample data and click "Run Model" to see output.</div>';
     contentEl.appendChild(resultsWrap);
 
-    function loadSample() {
+    async function loadSample() {
       try {
-        textarea.value = JSON.stringify(model.sample, null, 2);
+        const json = await api.getSampleData(uc);
+        if (formApi) formApi.setData(json); else textarea.value = JSON.stringify(json, null, 2);
         status.textContent = 'Sample data loaded.';
         status.className = 'status-line ok';
       } catch (err) {
@@ -129,42 +167,36 @@
       }
     }
 
-    function runModel() {
+    async function runModel() {
       let payload;
       try {
-        payload = JSON.parse(textarea.value || '{}');
+        payload = formApi ? formApi.getData() : JSON.parse(textarea.value || '{}');
       } catch (err) {
-        status.textContent = 'Invalid JSON input: ' + err.message;
+        status.textContent = 'Invalid input: ' + err.message;
         status.className = 'status-line error';
         return;
       }
       status.textContent = 'Running model...';
       status.className = 'status-line';
       runBtn.disabled = true;
-      // Defer to next tick so the "Running..." status paints before the (synchronous, CPU-bound) model runs.
-      setTimeout(() => {
-        try {
-          const started = performance.now();
-          const result = model.run(payload);
-          const elapsed = Math.round(performance.now() - started);
-          status.textContent = `Model executed successfully in ${elapsed}ms (in-browser).`;
-          status.className = 'status-line ok';
-          uc.render(resultsWrap, result);
-          tourBtn.disabled = !(uc.tour && uc.tour.length);
-        } catch (err) {
-          status.textContent = 'Error: ' + err.message;
-          status.className = 'status-line error';
-        } finally {
-          runBtn.disabled = false;
-        }
-      }, 10);
+      try {
+        const started = performance.now();
+        const result = await api.runModel(uc, payload);
+        const elapsed = Math.round(performance.now() - started);
+        status.textContent = `Model executed successfully in ${elapsed}ms (in-browser).`;
+        status.className = 'status-line ok';
+        uc.render(resultsWrap, result, { payload, rerun: runModel });
+        tourBtn.disabled = !(uc.tour && uc.tour.length);
+      } catch (err) {
+        status.textContent = 'Error: ' + err.message;
+        status.className = 'status-line error';
+      } finally {
+        runBtn.disabled = false;
+      }
     }
 
     loadBtn.addEventListener('click', loadSample);
     runBtn.addEventListener('click', runModel);
-    tourBtn.addEventListener('click', () => {
-      window.WISCoachmark.start(uc.tour, { tag: `${uc.tag} Requirement Walkthrough` });
-    });
 
     // Auto-load sample on first open for convenience.
     loadSample();

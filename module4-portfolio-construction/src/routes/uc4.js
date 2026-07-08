@@ -9,7 +9,7 @@ const SAMPLE_REQUEST = {
     RELIANCE: 0.12, TCS: 0.10, HDFCBANK: 0.15, INFY: 0.08, ITC: 0.05,
     LT: 0.08, NIFTYBEES: 0.25, GOLDBEES: 0.07, LIQUIDBEES: 0.10,
   },
-  driftBandAbs: 0.03,
+  driftBandAbs: 0.05,
   driftBandRel: 0.20,
   policy: 'threshold',
   cashflow: 50000,

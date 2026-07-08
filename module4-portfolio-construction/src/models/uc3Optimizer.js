@@ -276,7 +276,7 @@ function runOptimization(input) {
   };
 
   return {
-    universe: universe.map((u) => ({ id: u.id, name: u.name, sector: u.sector })),
+    universe: universe.map((u) => ({ id: u.id, name: u.name, sector: u.sector, vol: u.vol })),
     optimalWeights: universe.map((u, i) => ({ security: u.id, weight: Number(optimalWeights[i].toFixed(4)) })),
     efficientFrontier,
     currentPortfolio: { return: currentStats.ret, risk: currentStats.vol },
@@ -285,6 +285,9 @@ function runOptimization(input) {
     riskMetrics: { expectedReturn: ret, volatility: vol, sharpe, diversificationRatio, turnover, estimatedCost },
     feasibility,
     muUsed: useBlackLitterman ? 'black-litterman-blended' : 'house-view-prior',
+    // Exposed so the UI can let a user override weights and recompute stats client-side without a
+    // full re-solve: expected return / covariance are in the same order as `universe` above.
+    mu, covariance: Sigma, riskFreeRate,
   };
 }
 

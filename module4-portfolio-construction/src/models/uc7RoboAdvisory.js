@@ -25,7 +25,7 @@ function runRoboAdvisory(input) {
     lots = [],
     cashflow = 0,
     targetSuccessProbability = 0.80,
-    driftBandAbs = 0.03,
+    driftBandAbs = 0.05,
     rmOverride = null, // { category, rationale }
     seed = 11,
   } = input;

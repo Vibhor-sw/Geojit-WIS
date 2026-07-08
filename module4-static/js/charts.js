@@ -1,4 +1,5 @@
 // Minimal dependency-free SVG chart helpers used across the Module 4 use-case views.
+// All charts are interactive: hovering shows a floating tooltip with the exact values at that point.
 (function (global) {
   const NS = 'http://www.w3.org/2000/svg';
 
@@ -22,6 +23,32 @@
     return (n * 100).toFixed(digits != null ? digits : 1) + '%';
   }
 
+  // ---- Shared floating HTML tooltip, positioned relative to a chart's wrapper container ----
+  function ensureTooltip(container) {
+    let tip = container.querySelector(':scope > .chart-tooltip');
+    if (!tip) {
+      tip = document.createElement('div');
+      tip.className = 'chart-tooltip';
+      container.style.position = 'relative';
+      container.appendChild(tip);
+    }
+    return tip;
+  }
+  function showTooltip(container, x, y, html) {
+    const tip = ensureTooltip(container);
+    tip.innerHTML = html;
+    tip.style.display = 'block';
+    const tipW = tip.offsetWidth || 160;
+    let left = x + 14;
+    if (left + tipW > container.clientWidth) left = x - tipW - 14;
+    tip.style.left = Math.max(4, left) + 'px';
+    tip.style.top = Math.max(0, y - 10) + 'px';
+  }
+  function hideTooltip(container) {
+    const tip = container.querySelector(':scope > .chart-tooltip');
+    if (tip) tip.style.display = 'none';
+  }
+
   // Horizontal bar chart. data: [{label, value, color?}]
   function barChart(container, data, opts) {
     opts = opts || {};
@@ -41,19 +68,26 @@
       svg.appendChild(svgEl('text', { x: 0, y: y + rowH / 2 + 4, 'font-size': 11.5, fill: '#3a4653' })).textContent = d.label;
       const rect = svgEl('rect', {
         x: labelW, y: y + 3, width: barW, height: rowH - 10, rx: 3,
-        fill: d.color || opts.color || '#0b1f3a',
+        fill: d.color || opts.color || '#0b1f3a', style: 'cursor:pointer',
       });
+      const formatted = opts.valueFormatter ? opts.valueFormatter(d.value) : d.value;
+      rect.addEventListener('mousemove', (e) => {
+        const r = container.getBoundingClientRect();
+        showTooltip(container, e.clientX - r.left, e.clientY - r.top, `<strong>${d.label}</strong><br/>${formatted}${opts.tooltipSuffix || ''}`);
+      });
+      rect.addEventListener('mouseleave', () => hideTooltip(container));
       svg.appendChild(rect);
       const valText = svgEl('text', {
         x: labelW + barW + 6, y: y + rowH / 2 + 4, 'font-size': 11, fill: '#5b6b7c',
       });
-      valText.textContent = opts.valueFormatter ? opts.valueFormatter(d.value) : d.value;
+      valText.textContent = formatted;
       svg.appendChild(valText);
     });
     container.appendChild(svg);
   }
 
   // Percentile band chart. series: {p5:[], p25:[], p50:[], p75:[], p95:[]} equal length arrays across x = 0..n
+  // Hover anywhere in the plot area to see the exact percentile values at that x via crosshair + tooltip.
   function bandChart(container, series, opts) {
     opts = opts || {};
     container.innerHTML = '';
@@ -104,10 +138,46 @@
       svg.appendChild(t);
     });
 
+    // Interactive crosshair + hover dot, driven by an invisible overlay capturing mouse position.
+    const crosshair = svgEl('line', { x1: padL, x2: padL, y1: padT, y2: padT + chartH, stroke: '#8b98a5', 'stroke-width': 1, 'stroke-dasharray': '3,3', opacity: 0, 'pointer-events': 'none' });
+    const hoverDot = svgEl('circle', { r: 4, fill: '#d4a017', stroke: '#fff', 'stroke-width': 1.5, opacity: 0, 'pointer-events': 'none' });
+    svg.appendChild(crosshair);
+    svg.appendChild(hoverDot);
+
+    const overlay = svgEl('rect', { x: padL, y: padT, width: chartW, height: chartH, fill: 'transparent', style: 'cursor:crosshair' });
+    overlay.addEventListener('mousemove', (e) => {
+      const svgRect = svg.getBoundingClientRect();
+      const scaleX = width / svgRect.width;
+      const mouseX = (e.clientX - svgRect.left) * scaleX;
+      let idx = Math.round(((mouseX - padL) / chartW) * (n - 1));
+      idx = Math.max(0, Math.min(n - 1, idx));
+      const xx = x(idx), yy = y(series.p50[idx]);
+      crosshair.setAttribute('x1', xx); crosshair.setAttribute('x2', xx); crosshair.setAttribute('opacity', 1);
+      hoverDot.setAttribute('cx', xx); hoverDot.setAttribute('cy', yy); hoverDot.setAttribute('opacity', 1);
+      const label = opts.xLabel ? opts.xLabel(idx) : `Yr ${idx}`;
+      const contRect = container.getBoundingClientRect();
+      showTooltip(container, e.clientX - contRect.left, e.clientY - contRect.top, `
+        <strong>${label}</strong>
+        <table class="chart-tooltip-table">
+          <tr><td>95th pct</td><td>${fmtCompact(series.p95[idx])}</td></tr>
+          <tr><td>75th pct</td><td>${fmtCompact(series.p75[idx])}</td></tr>
+          <tr class="hl"><td>Median</td><td>${fmtCompact(series.p50[idx])}</td></tr>
+          <tr><td>25th pct</td><td>${fmtCompact(series.p25[idx])}</td></tr>
+          <tr><td>5th pct</td><td>${fmtCompact(series.p5[idx])}</td></tr>
+        </table>`);
+    });
+    overlay.addEventListener('mouseleave', () => {
+      crosshair.setAttribute('opacity', 0);
+      hoverDot.setAttribute('opacity', 0);
+      hideTooltip(container);
+    });
+    svg.appendChild(overlay);
+
     container.appendChild(svg);
   }
 
   // Simple scatter/line chart for an efficient frontier + a highlighted current-portfolio point.
+  // Hover any point (frontier, current, or optimal) to see its exact return/risk values.
   function frontierChart(container, frontier, currentPoint, optimalPoint, opts) {
     opts = opts || {};
     container.innerHTML = '';
@@ -133,20 +203,37 @@
     yLabel.textContent = 'Return ↑';
     svg.appendChild(yLabel);
 
+    function attachHover(el, ret, risk, labelText) {
+      el.style.cursor = 'pointer';
+      el.addEventListener('mousemove', (e) => {
+        const r = container.getBoundingClientRect();
+        showTooltip(container, e.clientX - r.left, e.clientY - r.top, `<strong>${labelText}</strong><br/>Return: ${fmtPct(ret)}<br/>Risk: ${fmtPct(risk)}`);
+      });
+      el.addEventListener('mouseleave', () => hideTooltip(container));
+    }
+
     const path = frontier.map((f, i) => `${i === 0 ? 'M' : 'L'} ${x(f.risk).toFixed(1)} ${y(f.return).toFixed(1)}`).join(' ');
     svg.appendChild(svgEl('path', { d: path, fill: 'none', stroke: '#0b1f3a', 'stroke-width': 2 }));
     frontier.forEach((f) => {
-      svg.appendChild(svgEl('circle', { cx: x(f.risk), cy: y(f.return), r: 2.5, fill: '#0b1f3a' }));
+      const c = svgEl('circle', { cx: x(f.risk), cy: y(f.return), r: 5, fill: '#0b1f3a', 'fill-opacity': 0.001, stroke: '#0b1f3a', 'stroke-width': 0 });
+      // a larger invisible hit-area circle plus a small visible dot, so hovering near the point is forgiving
+      svg.appendChild(svgEl('circle', { cx: x(f.risk), cy: y(f.return), r: 2.5, fill: '#0b1f3a', 'pointer-events': 'none' }));
+      attachHover(c, f.return, f.risk, 'Frontier point');
+      svg.appendChild(c);
     });
 
     if (currentPoint) {
-      svg.appendChild(svgEl('circle', { cx: x(currentPoint.risk), cy: y(currentPoint.return), r: 6, fill: '#c0392b' }));
+      const c = svgEl('circle', { cx: x(currentPoint.risk), cy: y(currentPoint.return), r: 6, fill: '#c0392b' });
+      attachHover(c, currentPoint.return, currentPoint.risk, 'Current Portfolio');
+      svg.appendChild(c);
       const t = svgEl('text', { x: x(currentPoint.risk) + 8, y: y(currentPoint.return) - 6, 'font-size': 10.5, fill: '#c0392b', 'font-weight': 700 });
       t.textContent = 'Current';
       svg.appendChild(t);
     }
     if (optimalPoint) {
-      svg.appendChild(svgEl('circle', { cx: x(optimalPoint.risk), cy: y(optimalPoint.return), r: 6, fill: '#d4a017' }));
+      const c = svgEl('circle', { cx: x(optimalPoint.risk), cy: y(optimalPoint.return), r: 6, fill: '#d4a017' });
+      attachHover(c, optimalPoint.return, optimalPoint.risk, 'Optimal Portfolio');
+      svg.appendChild(c);
       const t = svgEl('text', { x: x(optimalPoint.risk) + 8, y: y(optimalPoint.return) - 6, 'font-size': 10.5, fill: '#a67c00', 'font-weight': 700 });
       t.textContent = 'Optimal';
       svg.appendChild(t);
@@ -155,5 +242,5 @@
     container.appendChild(svg);
   }
 
-  global.WISCharts = { barChart, bandChart, frontierChart, fmtCompact, fmtPct };
+  global.WISCharts = { barChart, bandChart, frontierChart, fmtCompact, fmtPct, showTooltip, hideTooltip };
 })(window);
