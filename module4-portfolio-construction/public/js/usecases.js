@@ -69,6 +69,39 @@
 
   function tag(text, cls) { return `<span class="tag ${cls}">${text}</span>`; }
 
+  // A compact table-based weight editor (replaces sprawling one-field-per-security grids).
+  // rows: [{ id, name, cols: [preformatted extra cell values...], value: number(%), onChange(fraction) }]
+  function weightTable(rows, opts) {
+    opts = opts || {};
+    const headers = [opts.nameHeader || 'Security'].concat(opts.extraHeaders || []).concat([opts.weightHeader || 'Weight']);
+    return table(headers, rows.map((r) => {
+      const input = document.createElement('input');
+      input.type = 'number'; input.className = 'ui-input'; input.step = opts.step || '0.5';
+      input.style.width = '72px'; input.style.display = 'inline-block';
+      input.value = r.value;
+      input.addEventListener('input', () => r.onChange((Number(input.value) || 0) / 100));
+      const wrap = el('div');
+      wrap.style.display = 'flex'; wrap.style.alignItems = 'center'; wrap.style.gap = '4px';
+      wrap.appendChild(input); wrap.appendChild(el('span', null, '%'));
+      return [r.name].concat(r.cols || []).concat([wrap]);
+    }));
+  }
+
+  // Splits a security list into Stocks / Mutual Funds sub-tables (using window.WISRealHoldings'
+  // `type` field) so a 30+ security list reads as two short tables instead of one giant field grid.
+  function renderSplitWeightSection(container, items, opts) {
+    const stocks = items.filter((i) => i.type === 'STOCK');
+    const funds = items.filter((i) => i.type !== 'STOCK');
+    if (stocks.length) {
+      container.appendChild(el('div', null, '<strong style="font-size:12.5px;">Stocks</strong>'));
+      container.appendChild(weightTable(stocks, opts));
+    }
+    if (funds.length) {
+      container.appendChild(el('div', null, '<strong style="font-size:12.5px;margin-top:10px;display:block;">Mutual Funds</strong>'));
+      container.appendChild(weightTable(funds, opts));
+    }
+  }
+
   const USE_CASES = [
     {
       key: 'uc1', tag: 'M4-UC1', title: 'Goal-Based Asset Allocation', api: '/api/uc1', customPage: true,
@@ -120,9 +153,44 @@
           { id: 'g4', icon: '🚗', name: 'My Dream Car', targetAmount: 250000, horizonYears: 6, inflation: 0.06, allocatedHoldings: [], monthlySip: 5000, lumpSum: 0 },
         ];
         let selectedGoalId = null;
-        let riskCategory = 3;
-        let targetSuccessProbability = 0.80;
+        // Risk category is DERIVED from a short risk-profile questionnaire, not a direct dropdown --
+        // it isn't something a client should be able to dial up/down for themselves. Target success
+        // probability is a governed platform default (per the spec's "Configurable parameters" --
+        // an advisor/platform setting, not an end-client-facing input), so it's shown read-only too.
+        let riskProfile = { tolerance: [3, 3], capacity: [3, 3] };
+        function computeRiskCategory() {
+          const avg = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
+          return Math.max(1, Math.min(5, Math.round(Math.min(avg(riskProfile.tolerance), avg(riskProfile.capacity)))));
+        }
+        let riskCategory = computeRiskCategory();
+        const targetSuccessProbability = 0.80; // governed default, not user-adjustable
         let lastResult = null;
+
+        function openRiskQuestionnaireModal() {
+          const body = el('div');
+          const questions = [
+            { key: 'tolerance', idx: 0, label: 'If your investments fell 20% in a month, you would:', options: [[1, 'Sell everything immediately'], [2, 'Sell some of it'], [3, 'Hold and wait it out'], [4, 'Buy a little more'], [5, 'Buy a lot more']] },
+            { key: 'tolerance', idx: 1, label: 'Your ideal investment mix leans:', options: [[1, 'All safe / fixed income'], [2, 'Mostly safe'], [3, 'Balanced'], [4, 'Mostly growth'], [5, 'All growth / equity']] },
+            { key: 'capacity', idx: 0, label: 'How many years until you first need this money?', options: [[1, 'Less than 1 year'], [2, '1–3 years'], [3, '3–7 years'], [4, '7–15 years'], [5, '15+ years']] },
+            { key: 'capacity', idx: 1, label: 'How stable is your income?', options: [[1, 'Very unstable'], [2, 'Somewhat unstable'], [3, 'Stable'], [4, 'Very stable'], [5, 'Guaranteed / pension']] },
+          ];
+          const fields = questions.map((q) => {
+            const f = C.selectInput({ value: String(riskProfile[q.key][q.idx]), options: q.options.map(([v, l]) => ({ value: String(v), label: l })) });
+            body.appendChild(C.field(q.label, f));
+            return { q, f };
+          });
+          C.showModal({
+            icon: '🧭', title: 'Risk Profile Questionnaire', bodyEl: body,
+            actions: [
+              { label: 'Cancel', className: 'btn-secondary' },
+              { label: 'Save & Recalculate Category', className: 'btn-accent', onClick: () => {
+                fields.forEach(({ q, f }) => { riskProfile[q.key][q.idx] = Number(f.getValue()); });
+                riskCategory = computeRiskCategory();
+                renderSettings();
+              } },
+            ],
+          });
+        }
 
         function goalCurrentValue(g) { return g.allocatedHoldings.reduce((s, h) => s + h.amount, 0) + (g.currentValue || 0); }
         function fmtDate(yearsFromNow) {
@@ -144,12 +212,29 @@
 
         function renderSettings() {
           settingsPanel.innerHTML = '';
-          settingsPanel.appendChild(panelTitle('Household Settings', 'Applied across every goal when computing allocations — risk category sets the guardrail band for the glide-path; target success probability drives the SIP goal-seek.'));
+          settingsPanel.appendChild(panelTitle('Household Settings', 'These two values drive every goal\'s glide-path and SIP goal-seek below. Neither is a free-form dial: risk category comes from a risk-profile questionnaire, and the success-probability target is a governed platform default -- matching how an advisory platform actually works, rather than letting a client self-select their own risk band.'));
           const grid = el('div', 'form-grid');
-          const riskField = C.selectInput({ value: String(riskCategory), options: [1, 2, 3, 4, 5].map((n) => ({ value: String(n), label: `Category ${n}` })), onChange: (v) => { riskCategory = Number(v); } });
-          grid.appendChild(C.field('Risk Category', riskField, '1 = most conservative, 5 = most aggressive. Sets the min/max guardrail band around each goal\'s glide-path allocation.'));
-          const targetField = C.sliderInput({ value: targetSuccessProbability * 100, min: 50, max: 95, step: 5, format: (v) => v + '%', onChange: (v) => { targetSuccessProbability = v / 100; } });
-          grid.appendChild(C.field('Target Success Probability', targetField, 'If a goal\'s simulated probability of success falls below this, the required SIP is solved upward to close the gap.'));
+
+          const riskWrap = el('div', 'form-field');
+          const riskLabelRow = el('div', 'form-field-label');
+          riskLabelRow.appendChild(el('span', null, 'Risk Category'));
+          riskLabelRow.appendChild(infoIcon('Derived from the risk-profile questionnaire (tolerance + capacity), not directly editable -- capacity caps tolerance so an aggressive-minded client with low actual capacity isn\'t over-allocated to risk.'));
+          riskWrap.appendChild(riskLabelRow);
+          riskWrap.appendChild(el('div', null, `<strong style="font-size:15px;">Category ${riskCategory} / 5</strong>`));
+          const retakeBtn = el('button', 'btn btn-secondary', 'Retake Risk Assessment');
+          retakeBtn.style.marginTop = '6px'; retakeBtn.style.fontSize = '11px'; retakeBtn.style.padding = '5px 10px';
+          retakeBtn.addEventListener('click', openRiskQuestionnaireModal);
+          riskWrap.appendChild(retakeBtn);
+          grid.appendChild(riskWrap);
+
+          const targetWrap = el('div', 'form-field');
+          const targetLabelRow = el('div', 'form-field-label');
+          targetLabelRow.appendChild(el('span', null, 'Target Success Probability'));
+          targetLabelRow.appendChild(infoIcon('A governed platform default (per the spec\'s Model Specification "Configurable parameters"), not a client-adjustable input -- if a goal\'s simulated probability falls below this, the required SIP is solved upward to close the gap.'));
+          targetWrap.appendChild(targetLabelRow);
+          targetWrap.appendChild(el('div', null, `<strong style="font-size:15px;">${Math.round(targetSuccessProbability * 100)}%</strong> <span style="color:var(--text-muted);font-size:11.5px;">— governed default</span>`));
+          grid.appendChild(targetWrap);
+
           settingsPanel.appendChild(grid);
         }
 
@@ -426,11 +511,14 @@
           const panel1 = el('div', 'panel');
           panel1.id = 'panel-uc1-goal-table';
           panel1.appendChild(panelTitle('Goal Allocations — Detail',
-            'Each row: horizon → governed glide-path allocation (FR-GA-02), then a forward Monte Carlo projection estimates the probability of meeting the inflation-adjusted required corpus (FR-GA-03). If that probability was below your target, the required monthly SIP was solved via goal-seek to lift it back to target (FR-GA-04) — a score of 100/100 means the solved SIP exactly reaches your target probability, not that the goal is risk-free.'));
+            'Each row: horizon → governed glide-path allocation (FR-GA-02), then a forward Monte Carlo projection estimates the probability of meeting the Required Corpus (FR-GA-03). "Target Amount" is what you entered in today\'s ₹ on the goal card; "Required Corpus" is that same amount compounded forward by the goal\'s own inflation rate over its horizon (Required Corpus = Target Amount × (1+inflation)^years) -- the two numbers are deliberately different, not a mismatch, and this column pair shows the calculation directly. If probability was below target, the required monthly SIP was solved via goal-seek (FR-GA-04) — a score of 100/100 means the solved SIP exactly reaches your target probability, not that the goal is risk-free.'));
+          const targetAmountByName = {};
+          goals.forEach((g) => { targetAmountByName[g.name] = g.targetAmount; });
           panel1.appendChild(table(
-            ['Goal', 'Horizon', 'Required Corpus', 'Required SIP', 'Attainment Score', 'P(success)'],
+            ['Goal', 'Horizon', 'Target Amount (today\'s ₹)', 'Required Corpus (inflation-adjusted)', 'Required SIP', 'Attainment Score', 'P(success)'],
             data.goalAllocations.map((g) => [
               g.goalName, g.horizonBucket,
+              '₹' + fmtCompact(targetAmountByName[g.goalName] != null ? targetAmountByName[g.goalName] : g.requiredCorpus),
               '₹' + fmtCompact(g.requiredCorpus), '₹' + fmtCompact(g.requiredMonthlySip) + '/mo',
               g.goalAttainmentScore + '/100', fmtPct(g.probability),
             ])
@@ -467,12 +555,16 @@
           const p4 = el('div', 'panel');
           p4.appendChild(panelTitle('Scenario Wealth Paths (5th–95th percentile band, gold = median) — hover to see values',
             'A separate 500-path Monte Carlo run per goal (distinct from the probability-of-success calculation above, which uses its own simulation count) under the same capital-market assumptions and this goal\'s contribution schedule — shown to illustrate the dispersion of outcomes, not a single predicted number.'));
+          const chartGrid = el('div', 'chart-grid-2');
           data.scenarioPaths.forEach((sp) => {
-            p4.appendChild(el('div', null, `<strong>${sp.goalName}</strong>`));
+            const cell = el('div');
+            cell.appendChild(el('div', null, `<strong>${sp.goalName}</strong>`));
             const cw = el('div', 'chart-wrap');
-            p4.appendChild(cw);
-            bandChart(cw, sp.series, { xLabel: (i) => 'Yr ' + i });
+            cell.appendChild(cw);
+            chartGrid.appendChild(cell);
+            bandChart(cw, sp.series, { xLabel: (i) => 'Yr ' + i, width: 460 });
           });
+          p4.appendChild(chartGrid);
           resultsPanel.appendChild(p4);
         }
 
@@ -799,16 +891,19 @@
         grid2.appendChild(C.field('Transaction Cost', costField, 'Estimated cost per unit of trade, in basis points — used to estimate the cost of the trade list below.'));
         container.appendChild(grid2);
 
-        container.appendChild(el('div', 'panel-title', 'Current Holdings (your starting portfolio)'));
-        container.appendChild(el('p', null, '<span style="color:var(--text-muted);font-size:12.5px">Used to compute turnover and the trade list — how far the optimal portfolio is from what you hold today.</span>'));
-        const holdingsGrid = el('div', 'form-grid');
-        const holdingFields = {};
-        UNIVERSE_OPTIONS.forEach(([id, name]) => {
-          const f = C.numberInput({ value: Math.round((state.currentHoldings[id] || 0) * 1000) / 10, step: 0.5, suffix: '%', onChange: (v) => { state.currentHoldings[id] = (v || 0) / 100; } });
-          holdingFields[id] = f;
-          holdingsGrid.appendChild(C.field(name, f));
-        });
-        container.appendChild(holdingsGrid);
+        const holdingsSection = el('div');
+        container.appendChild(holdingsSection);
+        function renderHoldingsSection() {
+          holdingsSection.innerHTML = '';
+          holdingsSection.appendChild(el('div', 'panel-title', 'Current Holdings (your starting portfolio)'));
+          holdingsSection.appendChild(el('p', null, '<span style="color:var(--text-muted);font-size:12.5px">Used to compute turnover and the trade list — how far the optimal portfolio is from what you hold today.</span>'));
+          const items = REAL.map((h) => ({
+            id: h.id, name: h.name, type: h.type, value: Math.round((state.currentHoldings[h.id] || 0) * 1000) / 10,
+            onChange: (frac) => { state.currentHoldings[h.id] = frac; },
+          }));
+          renderSplitWeightSection(holdingsSection, items, { weightHeader: 'Current Weight' });
+        }
+        renderHoldingsSection();
 
         return {
           getData: () => JSON.parse(JSON.stringify(state)),
@@ -825,7 +920,7 @@
             finCapField.setValue((state.sectorCaps['Financial Services'] || 0) * 100);
             riskAvField.setValue(state.riskAversion);
             costField.setValue(state.transactionCostBps);
-            UNIVERSE_OPTIONS.forEach(([id]) => holdingFields[id].setValue(Math.round((state.currentHoldings[id] || 0) * 1000) / 10));
+            renderHoldingsSection();
           },
         };
       },
@@ -884,20 +979,21 @@
         // ---- Editable weights + live client-side recompute (no server round-trip needed) ----
         const p1b = el('div', 'panel');
         p1b.appendChild(panelTitle('Adjust Weights & See the Effect',
-          'This is a system-optimised starting point, not a mandate — edit any weight below and click Recalculate to see the resulting expected return / volatility / Sharpe for your own mix, computed instantly from the same return & risk model (no re-solve, just evaluated directly for your numbers).'));
-        const editGrid = el('div', 'form-grid');
+          'This is a system-optimised starting point, not a mandate — edit any "New Weight" below and click Recalculate to see the resulting expected return / volatility / Sharpe for your own mix, computed instantly from the same return & risk model (no re-solve, just evaluated directly for your numbers).'));
         const editedWeights = {};
-        data.optimalWeights.forEach((w) => {
-          const input = document.createElement('input');
-          input.type = 'number'; input.className = 'ui-input'; input.step = '0.5';
-          input.value = Math.round(w.weight * 1000) / 10;
+        const REAL_LOOKUP = {};
+        (global.WISRealHoldings || []).forEach((h) => { REAL_LOOKUP[h.id] = h; });
+        const nameById = {};
+        data.universe.forEach((u) => { nameById[u.id] = u.name; });
+        const editItems = data.optimalWeights.map((w) => {
           editedWeights[w.security] = w.weight;
-          input.addEventListener('input', () => { editedWeights[w.security] = (Number(input.value) || 0) / 100; });
-          const wrap = document.createElement('div'); wrap.className = 'input-affix-wrap';
-          wrap.appendChild(input); wrap.appendChild(el('span', 'input-affix', '%'));
-          editGrid.appendChild(C_field(w.security, wrap));
+          return {
+            id: w.security, name: nameById[w.security] || w.security, type: (REAL_LOOKUP[w.security] || {}).type || 'STOCK',
+            cols: [fmtPct(w.weight)], value: Math.round(w.weight * 1000) / 10,
+            onChange: (frac) => { editedWeights[w.security] = frac; },
+          };
         });
-        p1b.appendChild(editGrid);
+        renderSplitWeightSection(p1b, editItems, { extraHeaders: ['Optimal Weight'], weightHeader: 'New Weight' });
         const customResult = el('div', 'metric-row');
         customResult.style.marginTop = '14px';
         p1b.appendChild(customResult);
@@ -959,13 +1055,6 @@
           t.name, tag(t.side, t.side === 'BUY' ? 'buy' : 'sell'), fmtPct(t.currentWeight), fmtPct(t.targetWeight), fmtPct(t.delta), t.estimatedCostBps.toFixed(1),
         ])));
         container.appendChild(p4);
-
-        function C_field(label, controlEl) {
-          const wrap = el('div', 'form-field');
-          wrap.appendChild(el('div', 'form-field-label', label));
-          wrap.appendChild(controlEl);
-          return wrap;
-        }
       },
     },
 
@@ -1020,17 +1109,19 @@
 
         container.appendChild(el('div', 'panel-title', 'Target Weights by Security'));
         container.appendChild(el('p', null, '<span style="color:var(--text-muted);font-size:12.5px">Loaded from your current holdings. Edit any target weight below — the drift check and trade list will use these values.</span>'));
-        const weightsGrid = el('div', 'form-grid');
-        container.appendChild(weightsGrid);
-        const weightFields = {};
+        const weightsSection = el('div');
+        container.appendChild(weightsSection);
+        const REAL_LOOKUP4 = {};
+        (global.WISRealHoldings || []).forEach((h) => { REAL_LOOKUP4[h.id] = h; });
 
         function rebuildWeightFields() {
-          weightsGrid.innerHTML = '';
-          Object.keys(state.targetWeights).forEach((sec) => {
-            const f = C.numberInput({ value: Math.round(state.targetWeights[sec] * 1000) / 10, step: 0.5, suffix: '%', onChange: (v) => { state.targetWeights[sec] = (v || 0) / 100; } });
-            weightFields[sec] = f;
-            weightsGrid.appendChild(C.field(sec, f));
-          });
+          weightsSection.innerHTML = '';
+          const items = Object.keys(state.targetWeights).map((sec) => ({
+            id: sec, name: (REAL_LOOKUP4[sec] || {}).name || sec, type: (REAL_LOOKUP4[sec] || {}).type || 'STOCK',
+            value: Math.round(state.targetWeights[sec] * 1000) / 10,
+            onChange: (frac) => { state.targetWeights[sec] = frac; },
+          }));
+          renderSplitWeightSection(weightsSection, items, { weightHeader: 'Target Weight' });
         }
 
         return {
