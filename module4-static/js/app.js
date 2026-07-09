@@ -1,16 +1,17 @@
-// App shell: left-nav (Module 4 -> 7 sub-modules) + view switching.
+// App shell: left-nav (multiple modules, each -> its own sub-modules) + view switching.
 // Static build: models run entirely client-side via window.WISModels (see js/models.js) -- no backend/fetch.
 // Supports three input modes per use case: uc.customPage+renderPage, uc.buildForm, or a JSON textarea fallback.
 (function () {
-  const USE_CASES = window.WISUseCases;
   const menuEl = document.getElementById('menu');
   const contentEl = document.getElementById('content');
 
-  const MODULE = {
-    key: 'module4',
-    title: 'Module 4 — Portfolio Construction & Financial Planning',
-    subtitle: 'Goal allocation, optimisation, rebalancing, tax & robo-advisory',
-  };
+  const MODULES = [
+    { key: 'module3', title: 'Module 3: Research & Recommendation Platform', useCases: window.WISUseCasesM3 || [] },
+    { key: 'module4', title: 'Module 4: Portfolio Construction & Financial Planning', useCases: window.WISUseCases || [] },
+  ];
+  const ALL_USE_CASES = MODULES.reduce((a, m) => a.concat(m.useCases), []);
+  function findUseCase(key) { return ALL_USE_CASES.find((u) => u.key === key); }
+  function moduleOf(uc) { return MODULES.find((m) => m.useCases.includes(uc)); }
 
   // ---- Data-access adapter: static build runs models directly in the browser. ----
   const api = {
@@ -24,39 +25,43 @@
   };
 
   function buildSidebar() {
-    const moduleItem = document.createElement('div');
-    moduleItem.className = 'module-item';
+    MODULES.forEach((mod, idx) => {
+      const moduleItem = document.createElement('div');
+      moduleItem.className = 'module-item';
 
-    const header = document.createElement('div');
-    header.className = 'module-header';
-    header.innerHTML = `<span>${MODULE.title.replace('Module 4 — ', 'Module 4: ')}</span><span class="chevron">▶</span>`;
-    moduleItem.appendChild(header);
+      const header = document.createElement('div');
+      header.className = 'module-header';
+      header.innerHTML = `<span>${mod.title}</span><span class="chevron">▶</span>`;
+      moduleItem.appendChild(header);
 
-    const submenu = document.createElement('div');
-    submenu.className = 'submenu';
-    USE_CASES.forEach((uc) => {
-      const item = document.createElement('div');
-      item.className = 'submenu-item';
-      item.dataset.key = uc.key;
-      item.innerHTML = `<span class="uc-tag">${uc.tag}</span><span>${uc.title}</span>`;
-      item.addEventListener('click', (e) => {
-        e.stopPropagation();
-        navigate(uc.key);
+      const submenu = document.createElement('div');
+      submenu.className = 'submenu';
+      mod.useCases.forEach((uc) => {
+        const item = document.createElement('div');
+        item.className = 'submenu-item';
+        item.dataset.key = uc.key;
+        item.innerHTML = `<span class="uc-tag">${uc.tag}</span><span>${uc.title}</span>`;
+        item.addEventListener('click', (e) => {
+          e.stopPropagation();
+          navigate(uc.key);
+        });
+        submenu.appendChild(item);
       });
-      submenu.appendChild(item);
+      moduleItem.appendChild(submenu);
+
+      header.addEventListener('click', () => {
+        const expanded = header.classList.toggle('expanded');
+        submenu.classList.toggle('expanded', expanded);
+      });
+
+      menuEl.appendChild(moduleItem);
+
+      if (idx === 0) {
+        header.classList.add('expanded');
+        submenu.classList.add('expanded');
+        header.classList.add('active');
+      }
     });
-    moduleItem.appendChild(submenu);
-
-    header.addEventListener('click', () => {
-      const expanded = header.classList.toggle('expanded');
-      submenu.classList.toggle('expanded', expanded);
-    });
-
-    menuEl.appendChild(moduleItem);
-
-    header.classList.add('expanded');
-    submenu.classList.add('expanded');
-    header.classList.add('active');
   }
 
   function setActiveSubmenu(key) {
@@ -66,7 +71,7 @@
   }
 
   function navigate(key) {
-    const uc = USE_CASES.find((u) => u.key === key);
+    const uc = findUseCase(key);
     if (!uc) return;
     setActiveSubmenu(key);
     window.location.hash = key;
@@ -74,10 +79,11 @@
   }
 
   function renderUseCaseHeader(uc) {
+    const mod = moduleOf(uc);
     const header = document.createElement('div');
     header.className = 'uc-header';
     header.innerHTML = `
-      <div class="uc-eyebrow">${uc.tag} · Module 4</div>
+      <div class="uc-eyebrow">${uc.tag} · ${mod ? mod.title.split(':')[0] : ''}</div>
       <h1 class="uc-title">${uc.title}</h1>
       <p class="uc-objective">${uc.objective}</p>
       <div class="uc-fr-list">${uc.frs.map((f) => `<span class="fr-chip ${f.includes('(Must)') ? 'must' : ''}">${f}</span>`).join('')}</div>
@@ -86,7 +92,7 @@
 
     const note = document.createElement('div');
     note.className = 'note-box';
-    note.textContent = 'Running entirely in your browser on illustrative sample data (see js/models.js) — no backend, no data leaves this page. Replace with live vendor feeds (see Data-Source Mapping in the spec) before production use.';
+    note.textContent = 'Running entirely in your browser on illustrative sample/synthetic data — no backend, no data leaves this page. Replace with live vendor feeds (see Data-Source Mapping in the spec) before production use.';
     contentEl.appendChild(note);
   }
 
@@ -205,7 +211,7 @@
   buildSidebar();
 
   const initialKey = window.location.hash ? window.location.hash.slice(1) : null;
-  if (initialKey && USE_CASES.find((u) => u.key === initialKey)) {
+  if (initialKey && findUseCase(initialKey)) {
     navigate(initialKey);
   }
 })();

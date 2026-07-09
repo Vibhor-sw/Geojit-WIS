@@ -15,7 +15,16 @@ app.use('/api/uc5', require('./src/routes/uc5'));
 app.use('/api/uc6', require('./src/routes/uc6'));
 app.use('/api/uc7', require('./src/routes/uc7'));
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok', module: 'Module 4 - Portfolio Construction & Financial Planning' }));
+app.use('/api/m3uc1', require('./src/routes/m3uc1'));
+app.use('/api/m3uc2', require('./src/routes/m3uc2'));
+app.use('/api/m3uc3', require('./src/routes/m3uc3'));
+app.use('/api/m3uc4', require('./src/routes/m3uc4'));
+app.use('/api/m3uc5', require('./src/routes/m3uc5'));
+app.use('/api/m3uc6', require('./src/routes/m3uc6'));
+app.use('/api/m3uc7', require('./src/routes/m3uc7'));
+app.use('/api/m3uc8', require('./src/routes/m3uc8'));
+
+app.get('/api/health', (req, res) => res.json({ status: 'ok', modules: ['Module 3 - Research & Recommendation Platform', 'Module 4 - Portfolio Construction & Financial Planning'] }));
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
