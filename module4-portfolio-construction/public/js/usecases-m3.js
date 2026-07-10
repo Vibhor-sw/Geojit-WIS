@@ -53,7 +53,6 @@
   }
   function panel(id) { const p = el('div', 'panel'); if (id) p.id = id; return p; }
   function stockSelectField(universe, value, onChange, label) {
-    const select = C.selectInput ? null : null; // placeholder (selectInput lives on window.WISControls via ui-controls)
     const sel = document.createElement('select');
     sel.className = 'ui-select';
     (universe || []).forEach((s) => {
@@ -64,6 +63,29 @@
     });
     sel.addEventListener('change', () => onChange(sel.value));
     return C.field(label || 'Stock', sel, 'Pick any stock from the Module 3 universe (your 21 real holdings plus illustrative extras).');
+  }
+  // Rounds any number to at most 2 decimal places for display (also strips float artifacts like
+  // 0.43979999999999997) while leaving true integer counts (advancers, F-scores, ranks) untouched.
+  function fmt2(v) {
+    if (typeof v !== 'number' || !isFinite(v)) return v;
+    if (Number.isInteger(v)) return v;
+    return Math.round(v * 100) / 100;
+  }
+  // A plain-language "what's happening / what could go wrong" callout, placed first on every M3
+  // page so the numbers below aren't left open to interpretation — computed from the same data the
+  // rest of the page renders, not generic boilerplate.
+  function plainLanguagePanel(id, whatText, riskText) {
+    const p = panel(id);
+    p.classList.add('plain-summary');
+    p.appendChild(el('div', 'plain-summary-title', 'In Plain Language'));
+    p.appendChild(el('div', 'plain-summary-body', whatText));
+    if (riskText) {
+      const riskWrap = el('div', 'plain-summary-risk');
+      riskWrap.appendChild(el('div', 'plain-summary-risk-label', 'If Things Go South'));
+      riskWrap.appendChild(el('div', 'plain-summary-body', riskText));
+      p.appendChild(riskWrap);
+    }
+    return p;
   }
 
   const USE_CASES = [
@@ -78,42 +100,47 @@
       },
       render(container, data) {
         container.innerHTML = '';
+        const dir = data.marketOverview.indexMovePct >= 0 ? 'up' : 'down';
+        const breadthTone = data.breadth.adRatio >= 1 ? 'more stocks are rising than falling' : 'more stocks are falling than rising';
+        const volTone = data.volatility.highVolRegime ? 'volatility is running hot' : 'volatility is calm';
+        container.appendChild(plainLanguagePanel('panel-m3uc1-plain',
+          `Today this universe is ${dir} ${Math.abs(fmt2(data.marketOverview.indexMovePct))}%, ${breadthTone}, and ${volTone}. ${fmt2(data.breadth.pctAbove200Ema)}% of stocks are trading above their long-term (200-day) trend line — a rough gauge of how broadly healthy the market is right now.`,
+          `If volatility stays elevated and fewer stocks stay above their long-term trend, expect sharper daily swings and a higher chance that individual stocks break down technically. This is the kind of backdrop where diversification and position sizing matter most — it is not a prediction, just the risk the current data points to.`
+        ));
         const p1 = panel('panel-m3uc1-overview');
         p1.appendChild(panelTitle('Market Overview', 'FR-MI-01: index move, breadth, VIX-style regime and top movers assembled into one landing payload.'));
         const row = el('div', 'metric-row');
-        row.appendChild(metricCard('Synthetic Index Move', `${data.marketOverview.indexMovePct}%`, 'Cap-weighted basket of the universe', 'Weighted sum of each stock\'s return × its index weight (contribution attribution below).'));
-        row.appendChild(metricCard('Breadth (A/D Ratio)', data.breadth.adRatio, `${data.breadth.advancers} up / ${data.breadth.decliners} down`, 'FR-MI-02: advancers ÷ decliners across the universe.'));
-        row.appendChild(metricCard('% Above 200 EMA', `${data.breadth.pctAbove200Ema}%`, null, 'FR-MI-02: share of stocks trading above their 200-day EMA.'));
-        row.appendChild(metricCard('Volatility Regime', data.volatility.highVolRegime ? 'High-Vol' : 'Normal', `Level ${data.volatility.level} vs 50d MA ${data.volatility.ma50}`, 'FR-MI-03: illustrative VIX-like series (no licensed India VIX feed) vs its 50-day MA and 80th-percentile threshold.'));
+        row.appendChild(metricCard('Synthetic Index Move', `${fmt2(data.marketOverview.indexMovePct)}%`, 'Cap-weighted basket of the universe', 'Weighted sum of each stock\'s return × its index weight (contribution attribution below).'));
+        row.appendChild(metricCard('Breadth (A/D Ratio)', fmt2(data.breadth.adRatio), `${data.breadth.advancers} up / ${data.breadth.decliners} down`, 'FR-MI-02: advancers ÷ decliners across the universe.'));
+        row.appendChild(metricCard('% Above 200 EMA', `${fmt2(data.breadth.pctAbove200Ema)}%`, null, 'FR-MI-02: share of stocks trading above their 200-day EMA.'));
+        row.appendChild(metricCard('Volatility Regime', data.volatility.highVolRegime ? 'High-Vol' : 'Normal', `Level ${fmt2(data.volatility.level)} vs 50-Day MA ${fmt2(data.volatility.ma50)} (80th percentile: ${fmt2(data.volatility.percentileThreshold)})`, 'FR-MI-03: illustrative VIX-like series (no licensed India VIX feed) vs its 50-day moving average and 80th-percentile threshold.'));
         p1.appendChild(row);
         container.appendChild(p1);
 
         const p2 = panel('panel-m3uc1-attribution');
         p2.appendChild(panelTitle('Index Attribution — Top Movers', 'FR-MI-04: per-constituent contribution = weight × return, ranked to show which stocks pulled the index up/down.'));
         const two = el('div', 'two-col');
-        const up = el('div'); up.appendChild(el('div', null, '<strong>Top Up</strong>')); up.appendChild(table(['Stock', 'Weight %', 'Return %', 'Contribution (bps)'], data.indexAttribution.topUp.map((c) => [c.name, c.weight, c.return, c.contributionBps])));
-        const down = el('div'); down.appendChild(el('div', null, '<strong>Top Down</strong>')); down.appendChild(table(['Stock', 'Weight %', 'Return %', 'Contribution (bps)'], data.indexAttribution.topDown.map((c) => [c.name, c.weight, c.return, c.contributionBps])));
+        const up = el('div'); up.appendChild(el('div', null, '<strong>Top Up</strong>')); up.appendChild(table(['Stock', 'Weight %', 'Return %', 'Contribution (bps)'], data.indexAttribution.topUp.map((c) => [c.name, fmt2(c.weight), fmt2(c.return), fmt2(c.contributionBps)])));
+        const down = el('div'); down.appendChild(el('div', null, '<strong>Top Down</strong>')); down.appendChild(table(['Stock', 'Weight %', 'Return %', 'Contribution (bps)'], data.indexAttribution.topDown.map((c) => [c.name, fmt2(c.weight), fmt2(c.return), fmt2(c.contributionBps)])));
         two.appendChild(up); two.appendChild(down);
         p2.appendChild(two);
         container.appendChild(p2);
 
         const p3 = panel('panel-m3uc1-rotation');
-        p3.appendChild(panelTitle('Sector Rotation Heatmap', 'FR-MI-05: sector momentum z-score (trailing-return standardised across sectors) with a cyclicality tag. Positive = leading rotation.'));
-        const chartWrap = el('div', 'chart-wrap');
-        p3.appendChild(chartWrap);
-        barChart(chartWrap, data.sectorRotation.map((r) => ({ label: r.sector, value: r.momentumZ, sub: r.cyclicality })), { labelWidth: 220 });
+        p3.appendChild(panelTitle('Sector Rotation Heatmap', 'FR-MI-05: sector momentum Z-Score (trailing 1-month sector return standardised across sectors) with a Cyclicality tag (Early-Cycle / Mid-Cycle / Late-Cycle / Defensive). Positive Z-Score = leading rotation.'));
+        p3.appendChild(table(['Sector', 'Cyclicality', 'Momentum Z-Score', '1-Month Return %'], data.sectorRotation.map((r) => [r.sector, tag(r.cyclicality, 'hold'), fmt2(r.momentumZ), fmt2(r.trailing1mReturn)])));
         container.appendChild(p3);
 
         const p4 = panel('panel-m3uc1-liquidity');
         p4.appendChild(panelTitle('Delivery Volume & Liquidity Score', 'FR-MI-06: delivery % (5-day smoothed), average volume and an estimated executable trade size per stock.'));
-        p4.appendChild(table(['Stock', 'Avg Delivery %', 'Avg Volume', 'Executable Size', 'Liquidity Score'], data.liquidityScores.slice(0, 12).map((l) => [l.name, l.avgDeliveryPct, fmtCompact(l.avgVolume), fmtCompact(l.executableSize), l.liquidityScore])));
+        p4.appendChild(table(['Stock', 'Delivery % (5-Day Smoothed)', 'Avg Volume', 'Executable Size', 'Liquidity Score'], data.liquidityScores.slice(0, 12).map((l) => [l.name, fmt2(l.avgDeliveryPct), fmtCompact(l.avgVolume), fmtCompact(l.executableSize), l.liquidityScore])));
         container.appendChild(p4);
 
         const p5 = panel('panel-m3uc1-earnings');
         p5.appendChild(panelTitle('Earnings Hub', 'FR-MI-07: results announced (with surprise vs estimate) and a forward 30-day calendar.'));
         const two2 = el('div', 'two-col');
         const ann = el('div'); ann.appendChild(el('div', null, '<strong>Recently Announced</strong>'));
-        ann.appendChild(table(['Stock', 'Date', 'Estimate', 'Actual', 'Surprise %'], data.earningsHub.announced.slice(0, 10).map((e) => [e.name, e.date, fmtCompact(e.estimate), fmtCompact(e.actual), e.surprisePct])));
+        ann.appendChild(table(['Stock', 'Date', 'Estimate', 'Actual', 'Surprise %'], data.earningsHub.announced.slice(0, 10).map((e) => [e.name, e.date, fmtCompact(e.estimate), fmtCompact(e.actual), fmt2(e.surprisePct)])));
         const fwd = el('div'); fwd.appendChild(el('div', null, '<strong>Forward 30-Day Calendar</strong>'));
         fwd.appendChild(table(['Stock', 'Date'], data.earningsHub.forward30d.slice(0, 10).map((e) => [e.name, e.date])));
         two2.appendChild(ann); two2.appendChild(fwd);
@@ -123,9 +150,9 @@
       tour: [
         { fr: 'FR-MI-01', priority: 'Must', status: 'full', selector: '#panel-m3uc1-overview', requirement: 'Landing feed: index movements, breadth, VIX and top movers.', achieved: 'Metric row shows synthetic index move, breadth and volatility regime together as a landing payload.' },
         { fr: 'FR-MI-02', priority: 'Must', status: 'full', selector: '#panel-m3uc1-overview', requirement: 'Market breadth: A/D ratio and % above 200 EMA.', achieved: 'Both computed directly from the universe\'s latest OHLCV bars.' },
-        { fr: 'FR-MI-03', priority: 'Must', status: 'partial', selector: '#panel-m3uc1-overview', requirement: 'India VIX chart, 52w range, regime detection.', achieved: 'Regime detection logic is real (level vs 50d MA vs percentile), but the level series is a synthetic cross-sectional-dispersion proxy, not licensed India VIX (no feed in this prototype).' },
+        { fr: 'FR-MI-03', priority: 'Must', status: 'partial', selector: '#panel-m3uc1-overview', requirement: 'India VIX chart, 52w range, regime detection.', achieved: 'Regime detection logic is real (level vs 50-day MA vs 80th percentile, both shown on screen), but the level series is a synthetic cross-sectional-dispersion proxy, not licensed India VIX (no feed in this prototype).' },
         { fr: 'FR-MI-04', priority: 'Must', status: 'full', selector: '#panel-m3uc1-attribution', requirement: 'Constituent-level index up/down attribution.', achieved: 'weight × return computed per stock and ranked into Top Up / Top Down.' },
-        { fr: 'FR-MI-05', priority: 'Must', status: 'full', selector: '#panel-m3uc1-rotation', requirement: 'Sector rotation heatmap with momentum score and cycle tag.', achieved: 'Real z-score of trailing sector return, tagged with a static cyclicality map (Early/Mid/Late/Defensive).' },
+        { fr: 'FR-MI-05', priority: 'Must', status: 'full', selector: '#panel-m3uc1-rotation', requirement: 'Sector rotation heatmap with momentum score and cycle tag.', achieved: 'Table shows the real Momentum Z-Score per sector alongside its Cyclicality tag (Early-Cycle/Mid-Cycle/Late-Cycle/Defensive) — both terms rendered as visible columns, not just described in this tooltip.' },
         { fr: 'FR-MI-06', priority: 'Must', status: 'partial', selector: '#panel-m3uc1-liquidity', requirement: 'Delivery %, smoothing, executable size.', achieved: 'Score and executable-size estimate computed from synthetic delivery/volume series (no licensed NSE/BSE delivery feed).' },
         { fr: 'FR-MI-07', priority: 'Must', status: 'partial', selector: '#panel-m3uc1-earnings', requirement: 'Earnings hub with surprise and forward calendar.', achieved: 'Surprise computed as actual-vs-estimate net income; dates/estimates are synthetic (no earnings feed).' },
       ],
@@ -147,53 +174,60 @@
       },
       render(container, data) {
         container.innerHTML = '';
+        const sortedPillars = Object.entries(data.pillarScores).sort((a, b) => b[1] - a[1]);
+        const bestPillar = sortedPillars[0], worstPillar = sortedPillars[sortedPillars.length - 1];
+        const worstWatch = { fundamental: 'weakening margins or rising debt', technical: 'a break below the 200-day trend line', sentiment: 'a run of negative news or social chatter', macro: 'an adverse move in rates or growth for this sector', governance: 'promoter pledge or related-party red flags', valuation: 'the stock getting more expensive than its sector without earnings catching up' };
+        container.appendChild(plainLanguagePanel('panel-m3uc2-plain',
+          `${data.stock.name} looks strongest on ${bestPillar[0]} (${fmt2(bestPillar[1])}/100) and weakest on ${worstPillar[0]} (${fmt2(worstPillar[1])}/100). It's a mixed picture — no single pillar makes or breaks the case on its own, which is why all six are shown together below rather than one headline number.`,
+          `If ${worstPillar[0]} keeps deteriorating while the other pillars don't improve to compensate, the stock's overall Conviction Score (see M3-UC5) would likely slide toward a Sell-leaning rating. Watch for ${worstWatch[worstPillar[0]] || 'further weakness in this pillar'}.`
+        ));
         const p0 = panel('panel-m3uc2-header');
         p0.appendChild(panelTitle(`${data.stock.name} — Pillar Scores`, 'Each pillar normalised to 0-100 (FR spec: "Pillar sub-score normalised to comparable score for downstream conviction synthesis").'));
         const chartWrap = el('div', 'chart-wrap');
         p0.appendChild(chartWrap);
-        barChart(chartWrap, Object.entries(data.pillarScores).map(([k, v]) => ({ label: k[0].toUpperCase() + k.slice(1), value: v })), { max: 100, labelWidth: 110 });
+        barChart(chartWrap, Object.entries(data.pillarScores).map(([k, v]) => ({ label: k[0].toUpperCase() + k.slice(1), value: fmt2(v) })), { max: 100, labelWidth: 110 });
         container.appendChild(p0);
 
         const p1 = panel('panel-m3uc2-fundamental');
         p1.appendChild(panelTitle('Pillar 1 — Fundamental Analysis', 'FR-FA-05/06/07/08/10/11/12: DuPont, forensic scores, valuation inputs, sector KPIs and peer comparison.'));
         const row = el('div', 'metric-row');
-        row.appendChild(metricCard('5-Factor DuPont ROE', `${data.fundamentalPillar.dupont.roe}%`, `Tax ${data.fundamentalPillar.dupont.taxBurden} × Int ${data.fundamentalPillar.dupont.interestBurden} × Margin ${data.fundamentalPillar.dupont.operatingMargin}% × Turnover ${data.fundamentalPillar.dupont.assetTurnover} × Leverage ${data.fundamentalPillar.dupont.leverage}`, 'FR-FA-05: ROE = TaxBurden × InterestBurden × OperatingMargin × AssetTurnover × Leverage.'));
-        row.appendChild(metricCard('Beneish M-Score', data.fundamentalPillar.forensic.beneish.score, data.fundamentalPillar.forensic.beneish.flag, 'FR-FA-06: 8-ratio earnings-manipulation score; > -1.78 flags risk.'));
-        row.appendChild(metricCard('Altman Z-Score', data.fundamentalPillar.forensic.altman.score, data.fundamentalPillar.forensic.altman.zone, 'FR-FA-06: bankruptcy-risk score; Safe > 2.99, Grey 1.81-2.99, Distress < 1.81.'));
+        row.appendChild(metricCard('5-Factor DuPont ROE', `${fmt2(data.fundamentalPillar.dupont.roe)}%`, `Tax Burden ${fmt2(data.fundamentalPillar.dupont.taxBurden)} × Interest Burden ${fmt2(data.fundamentalPillar.dupont.interestBurden)} × Operating Margin ${fmt2(data.fundamentalPillar.dupont.operatingMargin)}% × Asset Turnover ${fmt2(data.fundamentalPillar.dupont.assetTurnover)} × Leverage ${fmt2(data.fundamentalPillar.dupont.leverage)}`, 'FR-FA-05: ROE = Tax Burden × Interest Burden × Operating Margin × Asset Turnover × Leverage.'));
+        row.appendChild(metricCard('Beneish M-Score', fmt2(data.fundamentalPillar.forensic.beneish.score), data.fundamentalPillar.forensic.beneish.flag, 'FR-FA-06: 8-ratio earnings-manipulation score; > -1.78 flags risk.'));
+        row.appendChild(metricCard('Altman Z-Score', fmt2(data.fundamentalPillar.forensic.altman.score), data.fundamentalPillar.forensic.altman.zone, 'FR-FA-06: bankruptcy-risk score; Safe > 2.99, Grey 1.81-2.99, Distress < 1.81.'));
         row.appendChild(metricCard('Piotroski F-Score', `${data.fundamentalPillar.forensic.piotroski.score} / 9`, null, 'FR-FA-06: 9-point fundamental-strength checklist.'));
         p1.appendChild(row);
         p1.appendChild(panelTitle('Sector KPIs', 'FR-FA-11: illustrative sector-relevant KPIs computed from the financial statements.'));
         p1.appendChild(table(['KPI', 'Value'], data.fundamentalPillar.sectorKPIs.map((k) => [k.label, k.value])));
         p1.appendChild(panelTitle('Peer Comparison', 'FR-FA-12: same-sector peers with ROE and revenue growth.'));
-        p1.appendChild(table(['Peer', 'ROE %', 'Revenue Growth %'], data.fundamentalPillar.peers.map((pr) => [pr.name, pr.roe, pr.revenueGrowth])));
+        p1.appendChild(table(['Peer', 'ROE %', 'Revenue Growth %'], data.fundamentalPillar.peers.map((pr) => [pr.name, fmt2(pr.roe), fmt2(pr.revenueGrowth)])));
         container.appendChild(p1);
 
         const p2 = panel('panel-m3uc2-technical');
         p2.appendChild(panelTitle('Pillar 2 — Technical Analysis', 'FR-TA-01..09: moving averages, RSI, MACD, Bollinger Bands, patterns, combination strategies, volume.'));
         const trow = el('div', 'metric-row');
-        trow.appendChild(metricCard('50 / 200 EMA', `${data.technicalPillar.indicators.ma50} / ${data.technicalPillar.indicators.ma200}`, data.technicalPillar.indicators.goldenCross ? 'Golden Cross (bullish)' : 'No cross', 'FR-TA-01: 50/200 crossover system.'));
-        trow.appendChild(metricCard('RSI (14)', data.technicalPillar.indicators.rsi14, data.technicalPillar.indicators.rsi14 > 70 ? 'Overbought' : data.technicalPillar.indicators.rsi14 < 30 ? 'Oversold' : 'Neutral', 'FR-TA-02: 14-day RSI.'));
-        trow.appendChild(metricCard('MACD Histogram', data.technicalPillar.indicators.macd.histogram, data.technicalPillar.indicators.macd.bullishCross ? 'Bullish crossover' : 'No crossover', 'FR-TA-03: MACD line vs signal line.'));
-        trow.appendChild(metricCard('Bollinger Bandwidth', `${data.technicalPillar.indicators.bollinger.bandwidthPct}%`, data.technicalPillar.indicators.bollinger.squeeze ? 'Squeeze detected' : 'Normal', 'FR-TA-04: (upper-lower)/mid; squeeze < 8%.'));
+        trow.appendChild(metricCard('50-Day / 200-Day EMA', `${fmt2(data.technicalPillar.indicators.ma50)} / ${fmt2(data.technicalPillar.indicators.ma200)}`, data.technicalPillar.indicators.goldenCross ? 'Golden Cross (bullish)' : 'No cross', 'FR-TA-01: 50-day/200-day EMA crossover system.'));
+        trow.appendChild(metricCard('RSI (14-Day)', fmt2(data.technicalPillar.indicators.rsi14), data.technicalPillar.indicators.rsi14 > 70 ? 'Overbought' : data.technicalPillar.indicators.rsi14 < 30 ? 'Oversold' : 'Neutral', 'FR-TA-02: 14-day Relative Strength Index (RSI).'));
+        trow.appendChild(metricCard('MACD Histogram', fmt2(data.technicalPillar.indicators.macd.histogram), data.technicalPillar.indicators.macd.bullishCross ? 'Bullish crossover' : 'No crossover', 'FR-TA-03: MACD line vs signal line (Moving Average Convergence Divergence).'));
+        trow.appendChild(metricCard('Bollinger Bandwidth', `${fmt2(data.technicalPillar.indicators.bollinger.bandwidthPct)}%`, data.technicalPillar.indicators.bollinger.squeeze ? 'Squeeze detected' : 'Normal', 'FR-TA-04: (Upper Band − Lower Band) / Middle Band; squeeze when bandwidth < 8%.'));
         p2.appendChild(trow);
         p2.appendChild(panelTitle('Detected Patterns', 'FR-TA-05/06: chart & candlestick pattern detection from indicator states.'));
         p2.appendChild(el('div', null, data.technicalPillar.patterns.length ? data.technicalPillar.patterns.map((pt) => tag(pt, 'buy')).join(' ') : '<span class="empty-hint">No patterns triggered today</span>'));
         p2.appendChild(panelTitle('12 Combination Strategies (Backtested Win Rate)', 'FR-TA-08: documented strategies with 72-90% historical win rates.'));
-        p2.appendChild(table(['Strategy', 'Win Rate %', 'Signal'], data.technicalPillar.strategies.map((s) => [s.name, s.winRatePct, tag(s.signal, s.signal === 'Bullish' ? 'buy' : 'hold')])));
+        p2.appendChild(table(['Strategy', 'Win Rate %', 'Signal'], data.technicalPillar.strategies.map((s) => [s.name, fmt2(s.winRatePct), tag(s.signal, s.signal === 'Bullish' ? 'buy' : 'hold')])));
         container.appendChild(p2);
 
         const p3 = panel('panel-m3uc2-sentiment');
         p3.appendChild(panelTitle('Pillars 3-6 — Sentiment, Macro, Governance, Valuation', 'FR-SA-01..04, FR-MA-01..04, FR-GO-01, FR-VA-01.'));
         const srow = el('div', 'metric-row');
-        srow.appendChild(metricCard('CSS (Sentiment Score)', data.sentimentPillar.css, `×${data.sentimentPillar.cssMultiplier} FA multiplier`, 'FR-SA-01/04: 20-factor, 6-channel weighted composite sentiment score, applied as a multiplier to fundamental score.'));
-        srow.appendChild(metricCard('Macro Impact', data.macroPillar.quantifiedImpact, `GDP ${data.macroPillar.series.gdpGrowthPct}% · Repo ${data.macroPillar.series.repoRatePct}%`, 'FR-MA-01: macro series mapped to a quantified sector-sensitivity impact.'));
-        srow.appendChild(metricCard('Governance Score', data.governancePillar.subscore, data.governancePillar.flags.join(', ') || 'No flags', 'FR-GO-01: pledge %, RPT flag and board independence rolled into one score.'));
-        srow.appendChild(metricCard('Valuation Band', data.valuationMeter.band, `P/E ${data.valuationMeter.pe} vs sector median ${data.valuationMeter.sectorMedianPE}`, 'FR-VA-01: Very Expensive → Very Attractive band from relative P/E vs sector peers.'));
+        srow.appendChild(metricCard('CSS (Composite Sentiment Score)', fmt2(data.sentimentPillar.css), `×${fmt2(data.sentimentPillar.cssMultiplier)} Fundamental-Analysis multiplier`, 'FR-SA-01/04: 20-factor, 6-channel weighted Composite Sentiment Score (CSS), applied as a multiplier to the fundamental score.'));
+        srow.appendChild(metricCard('Macro Impact', fmt2(data.macroPillar.quantifiedImpact), `GDP Growth ${fmt2(data.macroPillar.series.gdpGrowthPct)}% · Repo Rate ${fmt2(data.macroPillar.series.repoRatePct)}%`, 'FR-MA-01: macro series mapped to a quantified sector-sensitivity impact.'));
+        srow.appendChild(metricCard('Governance Score', fmt2(data.governancePillar.subscore), data.governancePillar.flags.join(', ') || 'No flags', 'FR-GO-01: promoter pledge %, related-party-transaction (RPT) flag and board independence rolled into one score.'));
+        srow.appendChild(metricCard('Valuation Band', data.valuationMeter.band, `P/E ${fmt2(data.valuationMeter.pe)} vs Sector Median P/E ${fmt2(data.valuationMeter.sectorMedianPE)}`, 'FR-VA-01: Very Expensive → Very Attractive band from relative Price-to-Earnings (P/E) vs sector peers.'));
         p3.appendChild(srow);
         p3.appendChild(panelTitle('Sentiment Channels', 'FR-SA-01: 6-channel weighted breakdown feeding the CSS.'));
-        p3.appendChild(table(['Channel', 'Score'], data.sentimentPillar.channelScores.map((c) => [c.channel, c.score])));
+        p3.appendChild(table(['Channel', 'Score'], data.sentimentPillar.channelScores.map((c) => [c.channel, fmt2(c.score)])));
         p3.appendChild(panelTitle('Sample Catalysts', 'FR-SA-02: NLP-scored news/social catalysts (illustrative headline bank, not a live news feed).'));
-        p3.appendChild(table(['Headline', 'Channel', 'Score'], data.sentimentPillar.catalysts.map((c) => [c.headline, c.channel, c.score])));
+        p3.appendChild(table(['Headline', 'Channel', 'Score'], data.sentimentPillar.catalysts.map((c) => [c.headline, c.channel, fmt2(c.score)])));
         container.appendChild(p3);
       },
       tour: [
@@ -230,40 +264,45 @@
       },
       render(container, data) {
         container.innerHTML = '';
+        const worstStress = [...data.stressTests].sort((a, b) => a.stressedConviction - b.stressedConviction)[0];
+        container.appendChild(plainLanguagePanel('panel-m3uc3-plain',
+          `Based on ${data.monteCarlo.pathCount.toLocaleString()} simulated price paths, there's roughly a ${fmt2(data.monteCarlo.probHitTarget)}% chance ${data.stock.name} reaches ₹${fmt2(data.monteCarlo.targetPrice)} within ${data.monteCarlo.horizonDays} trading days. A realistic range for the price over that time is about ₹${fmt2(data.monteCarlo.ci.p5)} to ₹${fmt2(data.monteCarlo.ci.p95)} — the wider that range, the less certain the outlook.`,
+          `In the worst modelled scenario (${worstStress.name}), conviction could fall to ${fmt2(worstStress.stressedConviction)}/100 — a real downgrade from where it stands today. This is a low-probability (${Math.round(worstStress.probability * 100)}%) scenario, not a forecast, but it shows how much the case could weaken if that risk materialises.`
+        ));
         const p1 = panel('panel-m3uc3-mc');
-        p1.appendChild(panelTitle(`${data.stock.name} — Monte Carlo Price Paths`, `FR-RQ-01: ${data.monteCarlo.pathCount.toLocaleString()} simulated GBM paths over ${data.monteCarlo.horizonDays} trading days, annual drift/vol estimated from realised returns.`));
+        p1.appendChild(panelTitle(`${data.stock.name} — Monte Carlo Price Paths`, `FR-RQ-01: ${data.monteCarlo.pathCount.toLocaleString()} simulated Geometric Brownian Motion (GBM) paths over ${data.monteCarlo.horizonDays} trading days, annual drift/volatility estimated from realised returns.`));
         const row = el('div', 'metric-row');
-        row.appendChild(metricCard('Median (P50)', data.monteCarlo.ci.p50, `5th-95th: ${data.monteCarlo.ci.p5} – ${data.monteCarlo.ci.p95}`, 'Percentile bands from the simulated terminal-price distribution.'));
-        row.appendChild(metricCard('P(hit target)', `${data.monteCarlo.probHitTarget}%`, `Target ${data.monteCarlo.targetPrice}`, 'Share of simulated paths that end at/above the target price.'));
-        row.appendChild(metricCard('Sharpe Ratio', data.riskRatios.sharpe, `Return ${data.riskRatios.annualReturnPct}% / Vol ${data.riskRatios.annualVolPct}%`, 'FR-RQ-06: (annual return − risk-free) / annual volatility.'));
-        row.appendChild(metricCard('Sortino Ratio', data.riskRatios.sortino, null, 'FR-RQ-06: uses downside deviation instead of total volatility.'));
+        row.appendChild(metricCard('Median (P50)', fmt2(data.monteCarlo.ci.p50), `5th-95th Percentile: ${fmt2(data.monteCarlo.ci.p5)} – ${fmt2(data.monteCarlo.ci.p95)}`, 'Percentile bands from the simulated terminal-price distribution.'));
+        row.appendChild(metricCard('Probability of Hitting Target', `${fmt2(data.monteCarlo.probHitTarget)}%`, `Target Price ${fmt2(data.monteCarlo.targetPrice)}`, 'Share of simulated paths that end at/above the target price.'));
+        row.appendChild(metricCard('Sharpe Ratio', fmt2(data.riskRatios.sharpe), `Annual Return ${fmt2(data.riskRatios.annualReturnPct)}% / Annual Volatility ${fmt2(data.riskRatios.annualVolPct)}%`, 'FR-RQ-06: (Annual Return − Risk-Free Rate) / Annual Volatility.'));
+        row.appendChild(metricCard('Sortino Ratio', fmt2(data.riskRatios.sortino), null, 'FR-RQ-06: uses downside deviation instead of total volatility.'));
         p1.appendChild(row);
         container.appendChild(p1);
 
         const p2 = panel('panel-m3uc3-adversarial');
         p2.appendChild(panelTitle('AI Adversarial Engine — Bull vs Bear', `FR-RQ-02: ${data.adversarial.netStance}. Convergence proof: ${data.adversarial.convergenceProof}`));
         const two = el('div', 'two-col');
-        const bull = el('div'); bull.appendChild(el('div', null, `<strong>Bull Case (score ${data.adversarial.bullCase.score})</strong>`));
-        bull.appendChild(table(['Point', 'Weight'], data.adversarial.bullCase.points.map((p) => [p.point, p.weight])));
-        const bear = el('div'); bear.appendChild(el('div', null, `<strong>Bear Case (score ${data.adversarial.bearCase.score})</strong>`));
-        bear.appendChild(table(['Point', 'Weight'], data.adversarial.bearCase.points.map((p) => [p.point, p.weight])));
+        const bull = el('div'); bull.appendChild(el('div', null, `<strong>Bull Case (score ${fmt2(data.adversarial.bullCase.score)})</strong>`));
+        bull.appendChild(table(['Point', 'Weight'], data.adversarial.bullCase.points.map((p) => [p.point, fmt2(p.weight)])));
+        const bear = el('div'); bear.appendChild(el('div', null, `<strong>Bear Case (score ${fmt2(data.adversarial.bearCase.score)})</strong>`));
+        bear.appendChild(table(['Point', 'Weight'], data.adversarial.bearCase.points.map((p) => [p.point, fmt2(p.weight)])));
         two.appendChild(bull); two.appendChild(bear);
         p2.appendChild(two);
         container.appendChild(p2);
 
         const p3 = panel('panel-m3uc3-stress');
         p3.appendChild(panelTitle('Red Team & Devil\'s Advocate Stress Tests', 'FR-RQ-03/04: predefined stress checks and black-swan scenarios with probability-weighted tail impact.'));
-        p3.appendChild(table(['Scenario', 'Category', 'Probability', 'Stressed Conviction', 'Tail Impact (weighted)'], data.stressTests.map((s) => [s.name, s.category, `${Math.round(s.probability * 100)}%`, s.stressedConviction, s.tailImpactWeighted])));
+        p3.appendChild(table(['Scenario', 'Category', 'Probability', 'Stressed Conviction', 'Tail Impact (weighted)'], data.stressTests.map((s) => [s.name, s.category, `${Math.round(s.probability * 100)}%`, fmt2(s.stressedConviction), fmt2(s.tailImpactWeighted)])));
         container.appendChild(p3);
 
         const p4 = panel('panel-m3uc3-backtest');
         p4.appendChild(panelTitle('Strategy Backtests', 'FR-RQ-05: win rate, average return and max drawdown for each of the 12 combination strategies, computed over this stock\'s actual price history.'));
-        p4.appendChild(table(['Strategy', 'Win Rate %', 'Avg Return %', 'Max Drawdown %'], data.backtests.map((b) => [b.name, b.winRatePct, b.avgReturnPct, b.maxDrawdownPct])));
+        p4.appendChild(table(['Strategy', 'Win Rate %', 'Avg Return %', 'Max Drawdown %'], data.backtests.map((b) => [b.name, fmt2(b.winRatePct), fmt2(b.avgReturnPct), fmt2(b.maxDrawdownPct)])));
         container.appendChild(p4);
 
         const p5 = panel('panel-m3uc3-inference');
         p5.appendChild(panelTitle('Inference Map', 'FR-RQ-08: dependency graph showing how the conviction score derives from the six pillars plus the adversarial net stance.'));
-        p5.appendChild(table(['Node', 'Value', 'Feeds Into'], data.inferenceMap.nodes.map((n) => [n.label, n.value != null ? n.value : '—', data.inferenceMap.edges.filter((e) => e.from === n.id).map((e) => e.to).join(', ') || '—'])));
+        p5.appendChild(table(['Node', 'Value', 'Feeds Into'], data.inferenceMap.nodes.map((n) => [n.label, n.value != null ? fmt2(n.value) : '—', data.inferenceMap.edges.filter((e) => e.from === n.id).map((e) => e.to).join(', ') || '—'])));
         container.appendChild(p5);
 
         const p6 = panel('panel-m3uc3-audit');
@@ -296,21 +335,29 @@
             wrap.innerHTML = '';
             state.scanCriteria = { ...(sample.scanCriteria || {}) };
             wrap.appendChild(C.field('Min ROE %', C.numberInput({ value: state.scanCriteria.minRoe || 0, step: 1, onChange: (v) => { state.scanCriteria.minRoe = v; } }), 'FR-SD-01: combination scan criterion over fundamental fields.'));
-            wrap.appendChild(C.field('Min 1M Momentum %', C.numberInput({ value: state.scanCriteria.minMomentum || '', step: 1, onChange: (v) => { state.scanCriteria.minMomentum = v; } }), 'Technical criterion — combine with fundamental filters (AND logic).'));
+            wrap.appendChild(C.field('Min 1-Month Momentum %', C.numberInput({ value: state.scanCriteria.minMomentum || '', step: 1, onChange: (v) => { state.scanCriteria.minMomentum = v; } }), 'Technical criterion — combine with fundamental filters (AND logic).'));
           },
           getData: () => state,
         };
       },
       render(container, data) {
         container.innerHTML = '';
+        const topInstitutional = data.institutionalIntent[0];
+        const highRiskEvents = data.eventRisk.filter((e) => e.riskLevel === 'High');
+        container.appendChild(plainLanguagePanel('panel-m3uc4-plain',
+          `${data.scanResults.matchCount} stocks matched your scan. ${topInstitutional.name} currently shows the strongest institutional buying interest (intent score ${fmt2(topInstitutional.institutionalIntentScore)}) — large investors have been net buyers there recently.`,
+          highRiskEvents.length
+            ? `${highRiskEvents.length} upcoming event${highRiskEvents.length > 1 ? 's are' : ' is'} flagged High risk, including ${highRiskEvents[0].name}'s ${highRiskEvents[0].eventType} on ${highRiskEvents[0].date}. A disappointing result or negative surprise around dates like that can move a stock sharply in a single session.`
+            : `No events are currently flagged High risk, but always check the Event-Risk Calendar before results season — that's when most single-day drops happen.`
+        ));
         const p1 = panel('panel-m3uc4-scan');
         p1.appendChild(panelTitle('Combination Scan Results', `FR-SD-01: ${data.scanResults.matchCount} matches for the criteria you set (AND-combined across fundamental/technical fields).`));
-        p1.appendChild(table(['Stock', 'Sector', 'Cap', 'ROE %', 'Price'], data.scanResults.results.slice(0, 15).map((r) => [r.name, r.sector, r.macap, r.roe, r.currentPrice])));
+        p1.appendChild(table(['Stock', 'Sector', 'Cap', 'ROE %', 'Price'], data.scanResults.results.slice(0, 15).map((r) => [r.name, r.sector, r.macap, fmt2(r.roe), fmt2(r.currentPrice)])));
         container.appendChild(p1);
 
         const p2 = panel('panel-m3uc4-institutional');
         p2.appendChild(panelTitle('Institutional Intent', 'FR-SD-02: bulk/block deal count and net promoter/FII/DII flow, combined into one intent score.'));
-        p2.appendChild(table(['Stock', 'Bulk/Block (30d)', 'Promoter Flow', 'FII Flow', 'DII Flow', 'Intent Score'], data.institutionalIntent.slice(0, 12).map((i) => [i.name, i.bulkBlockDealsLast30d, i.promoterNetFlow, i.fiiNetFlow, i.diiNetFlow, i.institutionalIntentScore])));
+        p2.appendChild(table(['Stock', 'Bulk/Block Deals (30d)', 'Promoter Net Flow', 'FII Net Flow', 'DII Net Flow', 'Institutional Intent Score'], data.institutionalIntent.slice(0, 12).map((i) => [i.name, i.bulkBlockDealsLast30d, fmt2(i.promoterNetFlow), fmt2(i.fiiNetFlow), fmt2(i.diiNetFlow), fmt2(i.institutionalIntentScore)])));
         container.appendChild(p2);
 
         const p3 = panel('panel-m3uc4-events');
@@ -319,7 +366,7 @@
         container.appendChild(p3);
 
         const p4 = panel('panel-m3uc4-rotation');
-        p4.appendChild(panelTitle('Rotation Recommendations', 'FR-SD-04 (Should Have): stocks in the top-3 momentum-ranked sectors from Act 1.'));
+        p4.appendChild(panelTitle('Rotation Recommendations', 'FR-SD-04 (Should Have): stocks in the top-3 Momentum Z-Score-ranked sectors from Act 1.'));
         p4.appendChild(el('div', null, data.rotationRecommendations.length ? data.rotationRecommendations.map((r) => `<div>${r.name} — <span style="color:var(--text-muted)">${r.rationale}</span></div>`).join('') : '<span class="empty-hint">Run Act 1 first to feed sector-rotation context.</span>'));
         container.appendChild(p4);
 
@@ -327,14 +374,14 @@
         p5.appendChild(panelTitle('Big-Bull / Investor Portfolios', 'FR-SD-05: tracked investor holdings from quarterly filings (illustrative investor list here).'));
         data.investorPortfolios.forEach((inv) => {
           p5.appendChild(el('div', null, `<strong>${inv.investor}</strong> <span style="color:var(--text-muted);font-size:12px">(${inv.asOfQuarter})</span>`));
-          p5.appendChild(table(['Stock', 'Holding %'], inv.holdings.map((h) => [h.name, h.holdingPct])));
+          p5.appendChild(table(['Stock', 'Holding %'], inv.holdings.map((h) => [h.name, fmt2(h.holdingPct)])));
         });
         container.appendChild(p5);
 
         const p6 = panel('panel-m3uc4-ipo');
-        p6.appendChild(panelTitle('IPO Analysis', 'FR-SD-06: GMP, subscription and fundamentals scoring for tracked IPOs.'));
-        p6.appendChild(table(['IPO', 'Sector', 'GMP %', 'Subscription ×', 'Fundamentals Score', 'Post-Listing Conviction'], data.ipoAnalysis.map((i) => [i.name, i.sector, i.gmpPct, i.subscriptionX, i.fundamentalsScore, i.postListingConviction])));
-        p6.appendChild(el('div', null, '<span style="color:var(--text-muted);font-size:12px">GMP is grey-market and speculative — not investment advice.</span>'));
+        p6.appendChild(panelTitle('IPO Analysis', 'FR-SD-06: Grey Market Premium (GMP), subscription and fundamentals scoring for tracked IPOs.'));
+        p6.appendChild(table(['IPO', 'Sector', 'GMP %', 'Subscription ×', 'Fundamentals Score', 'Post-Listing Conviction'], data.ipoAnalysis.map((i) => [i.name, i.sector, fmt2(i.gmpPct), fmt2(i.subscriptionX), fmt2(i.fundamentalsScore), fmt2(i.postListingConviction)])));
+        p6.appendChild(el('div', null, '<span style="color:var(--text-muted);font-size:12px">GMP (Grey Market Premium) is grey-market and speculative — not investment advice.</span>'));
         container.appendChild(p6);
 
         const p7 = panel('panel-m3uc4-themes');
@@ -356,7 +403,7 @@
         { fr: 'FR-SD-01', priority: 'Must', status: 'full', selector: '#panel-m3uc4-scan', requirement: 'Combination scans across price/fundamental/technical criteria.', achieved: 'AND-combined filter over ROE, cap, sector and momentum fields, executed live over the universe.' },
         { fr: 'FR-SD-02', priority: 'Must', status: 'partial', selector: '#panel-m3uc4-institutional', requirement: 'Institutional intent: bulk/block, promoter, FII/DII.', achieved: 'Real weighted-composite scoring formula; underlying flow numbers are synthetic (no NSE/BSE bulk-deal feed).' },
         { fr: 'FR-SD-03', priority: 'Must', status: 'partial', selector: '#panel-m3uc4-events', requirement: 'Event-risk tagging on upcoming corporate actions.', achieved: 'Risk-level tagging logic works; event dates/types are synthetic (no corporate-actions feed).' },
-        { fr: 'FR-SD-04', priority: 'Should', status: 'full', selector: '#panel-m3uc4-rotation', requirement: 'Rotation ideas derived from Act 1 sector/cycle signals.', achieved: 'Pulls the top-3 momentum-ranked sectors directly from the Act 1 model output.' },
+        { fr: 'FR-SD-04', priority: 'Should', status: 'full', selector: '#panel-m3uc4-rotation', requirement: 'Rotation ideas derived from Act 1 sector/cycle signals.', achieved: 'Pulls the top-3 Momentum Z-Score-ranked sectors directly from the Act 1 model output.' },
         { fr: 'FR-SD-05', priority: 'Must', status: 'partial', selector: '#panel-m3uc4-investors', requirement: '300+ tracked investor portfolios via quarterly filings.', achieved: '5 illustrative investors with synthetic holdings — real scale (300+) needs a licensed shareholding-filings feed.' },
         { fr: 'FR-SD-06', priority: 'Must', status: 'partial', selector: '#panel-m3uc4-ipo', requirement: 'IPO analysis: GMP, subscription, fundamentals score.', achieved: 'All three fields computed with clear GMP speculative-disclaimer; based on 3 illustrative IPOs, not a live IPO pipeline.' },
         { fr: 'FR-SD-07', priority: 'Must', status: 'full', selector: '#panel-m3uc4-themes', requirement: 'Investment themes with constituent mapping.', achieved: '4 themes mapped to universe constituents by sector.' },
@@ -393,6 +440,15 @@
       },
       render(container, data) {
         container.innerHTML = '';
+        const ratingPlain = data.rating === 'Strong Buy' || data.rating === 'Buy' ? 'the weight of evidence across fundamentals, technicals and sentiment currently favours this stock'
+          : data.rating === 'Hold' ? 'the evidence is mixed — there is no strong case to add to or exit this position right now'
+          : 'the weight of evidence currently favours caution on this stock';
+        container.appendChild(plainLanguagePanel('panel-m3uc5-plain',
+          `${data.stock.name} scores ${fmt2(data.convictionScore)}/100, which maps to a ${data.rating} rating. In plain terms: ${ratingPlain}.`,
+          data.sandboxResult
+            ? `Under the macro scenario you set in the sandbox, the score would move to ${fmt2(data.sandboxResult.sandboxScore)}/100 (${data.sandboxResult.sandboxRating}) — that is the kind of shift that can flip a Hold into a Sell. This sandbox result is exploratory only and is never published to the ledger.`
+            : `Try the Scenario Sandbox below (e.g. a GDP slowdown or a rate hike) to see how much this score could move under a worse macro backdrop — a governed score is only ever as good as the assumptions behind it.`
+        ));
         const p1 = panel('panel-m3uc5-score');
         p1.appendChild(panelTitle(`${data.stock.name} — Conviction Score`, 'FR-CS-01: weighted composition of the six pillar sub-scores, mapped to a rating band.'));
         const row = el('div', 'metric-row');
@@ -411,13 +467,13 @@
           p2.appendChild(el('div', 'empty-hint', 'Preview only — toggle "Publish to Ledger" to append an immutable entry.'));
         }
         p2.appendChild(panelTitle('Recommendation vs OHLC — Time-Series Tracking', 'FR-CS-04: prior calls tracked against realised performance.'));
-        p2.appendChild(data.recommendationTimeline.length ? table(['Date', 'Rating', 'Score', 'Price at Call', 'Current Price', 'Realised %'], data.recommendationTimeline.map((t) => [t.date, t.rating, t.score, t.priceAtCall, t.currentPrice, t.realisedPerformancePct])) : el('div', 'empty-hint', 'No prior published calls for this stock yet — publish one above to start tracking.'));
+        p2.appendChild(data.recommendationTimeline.length ? table(['Date', 'Rating', 'Score', 'Price at Call', 'Current Price', 'Realised %'], data.recommendationTimeline.map((t) => [t.date, t.rating, fmt2(t.score), fmt2(t.priceAtCall), fmt2(t.currentPrice), fmt2(t.realisedPerformancePct)])) : el('div', 'empty-hint', 'No prior published calls for this stock yet — publish one above to start tracking.'));
         container.appendChild(p2);
 
         const p3 = panel('panel-m3uc5-sandbox');
         p3.appendChild(panelTitle('Scenario Sandbox', 'FR-CS-05: exploratory recompute under adjusted macro assumptions — never persisted to the published ledger.'));
         if (data.sandboxResult) {
-          p3.appendChild(el('div', null, `<div>Sandbox score: <strong>${data.sandboxResult.sandboxScore}</strong> (${data.sandboxResult.sandboxRating})</div><div>Implied intrinsic value: ₹${data.sandboxResult.impliedIntrinsicValue}</div><div style="color:var(--text-muted);font-size:12px">${tag('Exploratory — not published', 'hold')}</div>`));
+          p3.appendChild(el('div', null, `<div>Sandbox score: <strong>${fmt2(data.sandboxResult.sandboxScore)}</strong> (${data.sandboxResult.sandboxRating})</div><div>Implied intrinsic value: ₹${fmt2(data.sandboxResult.impliedIntrinsicValue)}</div><div style="color:var(--text-muted);font-size:12px">${tag('Exploratory — not published', 'hold')}</div>`));
         } else {
           p3.appendChild(el('div', 'empty-hint', 'Set macro deltas above to explore.'));
         }
@@ -458,17 +514,21 @@
       },
       render(container, data) {
         container.innerHTML = '';
+        container.appendChild(plainLanguagePanel('panel-m3uc6-plain',
+          `${data.screenResults.length} stocks matched ${data.compiledQuery && data.compiledQuery.bucket ? `the "${data.compiledQuery.bucket}" bucket` : 'your query'}. Treat this as a shortlist for further research, not a set of automatic recommendations — open a match in Six-Pillar Analysis (M3-UC2) before acting on it.`,
+          `A stock can match a screen on paper (for example, a high ROE) while still carrying a hidden risk the screen doesn't capture, such as a governance flag or a stretched valuation. Cross-check the Conviction Score and any detected chart patterns above before treating a match as a buy idea.`
+        ));
         const p1 = panel('panel-m3uc6-query');
-        p1.appendChild(panelTitle('Compiled Query', 'FR-SC-03: the NL query (or bucket) translated to explicit filters and echoed back — never applied silently.'));
+        p1.appendChild(panelTitle('Compiled Query', 'FR-SC-03: the Natural-Language (NL) query (or bucket) translated to explicit filters and echoed back — never applied silently.'));
         p1.appendChild(el('pre', null, JSON.stringify(data.compiledQuery, null, 2)));
         container.appendChild(p1);
 
         const p2 = panel('panel-m3uc6-results');
-        p2.appendChild(panelTitle('Screen Results', `FR-SC-01: ${data.screenResults.length} matches with CMP, target, ROE and (if enabled) conviction.`));
+        p2.appendChild(panelTitle('Screen Results', `FR-SC-01: ${data.screenResults.length} matches with Current Market Price (CMP), target, ROE and (if enabled) conviction.`));
         const hasConviction = data.screenResults.length && data.screenResults[0].convictionScore != null;
         p2.appendChild(table(
           hasConviction ? ['Stock', 'Sector', 'CMP', 'Target', 'ROE %', 'Conviction', 'Rating'] : ['Stock', 'Sector', 'CMP', 'ROE %'],
-          data.screenResults.slice(0, 15).map((r) => hasConviction ? [r.name, r.sector, r.currentPrice, r.targetPrice, r.roe, r.convictionScore, tag(r.rating, ratingTagClass(r.rating))] : [r.name, r.sector, r.currentPrice, r.roe])
+          data.screenResults.slice(0, 15).map((r) => hasConviction ? [r.name, r.sector, fmt2(r.currentPrice), fmt2(r.targetPrice), fmt2(r.roe), fmt2(r.convictionScore), tag(r.rating, ratingTagClass(r.rating))] : [r.name, r.sector, fmt2(r.currentPrice), fmt2(r.roe)])
         ));
         container.appendChild(p2);
 
@@ -517,14 +577,27 @@
       },
       render(container, data) {
         container.innerHTML = '';
+        if (data.holdingContext.held) {
+          const topAlert = data.surfacedAlerts.alerts[0];
+          container.appendChild(plainLanguagePanel('panel-m3uc7-plain',
+            `You hold ${data.holdingContext.qty} shares worth about ₹${fmtCompact(data.holdingContext.marketValue)}, currently ${data.holdingContext.pnlPct >= 0 ? 'up' : 'down'} ${fmt2(Math.abs(data.holdingContext.pnlPct))}% from what you paid. It's rated ${data.holdingContext.rating} with a conviction score of ${fmt2(data.holdingContext.conviction)}/100.`,
+            topAlert
+              ? `${topAlert.message}${topAlert.type === 'Concentration' ? ' — a downturn in that sector would hit your overall portfolio harder than it would a well-diversified one.' : ' — if this continues, the position may be worth reviewing rather than holding by default.'}`
+              : `No portfolio alerts are currently flagged for this holding, but conditions (and conviction scores) can change — check back after major news or results.`
+          ));
+        } else {
+          container.appendChild(plainLanguagePanel('panel-m3uc7-plain',
+            `You don't currently hold this stock — the analysis below is exploratory, showing how it would fit if you added it.`, null
+          ));
+        }
         const p1 = panel('panel-m3uc7-holding');
         p1.appendChild(panelTitle('Holding-Aware Analysis', 'FR-PR-01: your position status, weight, P&L and the health-score impact of a buy/sell decision.'));
         if (data.holdingContext.held) {
           const row = el('div', 'metric-row');
-          row.appendChild(metricCard('Weight in Portfolio', `${data.holdingContext.weight}%`, `${data.holdingContext.qty} shares @ ₹${data.holdingContext.costBasis}`));
-          row.appendChild(metricCard('P&L', `${data.holdingContext.pnlPct}%`, `CMP ₹${data.holdingContext.currentPrice}`));
-          row.appendChild(metricCard('Conviction / Rating', data.holdingContext.conviction, tag(data.holdingContext.rating, ratingTagClass(data.holdingContext.rating))));
-          row.appendChild(metricCard('Health Impact if Sold', data.holdingContext.healthImpactSell, null, 'Illustrative Δ to a portfolio health score if this position were sold.'));
+          row.appendChild(metricCard('Weight in Portfolio', `${fmt2(data.holdingContext.weight)}%`, `${data.holdingContext.qty} shares @ ₹${fmt2(data.holdingContext.costBasis)}`));
+          row.appendChild(metricCard('P&L', `${fmt2(data.holdingContext.pnlPct)}%`, `CMP ₹${fmt2(data.holdingContext.currentPrice)}`));
+          row.appendChild(metricCard('Conviction / Rating', fmt2(data.holdingContext.conviction), tag(data.holdingContext.rating, ratingTagClass(data.holdingContext.rating))));
+          row.appendChild(metricCard('Health Impact if Sold', fmt2(data.holdingContext.healthImpactSell), null, 'Illustrative Δ to a portfolio health score if this position were sold.'));
           p1.appendChild(row);
         } else {
           p1.appendChild(el('div', 'empty-hint', 'Not currently held.'));
@@ -538,7 +611,7 @@
         } else if (!data.switchSuggestions.suggestions.length) {
           p2.appendChild(el('div', 'empty-hint', 'No qualifying same-sector/cap replacement found (needs higher conviction than the held stock).'));
         } else {
-          p2.appendChild(table(['Candidate', 'Conviction', 'Rating', 'Correlation to Held', 'Replacement Score'], data.switchSuggestions.suggestions.map((s) => [s.name, s.convictionScore, tag(s.rating, ratingTagClass(s.rating)), s.correlationToHeld, s.replacementScore])));
+          p2.appendChild(table(['Candidate', 'Conviction', 'Rating', 'Correlation to Held', 'Replacement Score'], data.switchSuggestions.suggestions.map((s) => [s.name, fmt2(s.convictionScore), tag(s.rating, ratingTagClass(s.rating)), fmt2(s.correlationToHeld), fmt2(s.replacementScore)])));
         }
         container.appendChild(p2);
 
@@ -549,12 +622,12 @@
 
         const p4 = panel('panel-m3uc7-gap');
         p4.appendChild(panelTitle('Model-Portfolio Gap Analysis', `FR-PR-04: your portfolio vs the ${data.templateGap.templateName} template by market-cap bucket.`));
-        p4.appendChild(table(['Bucket', 'Current %', 'Target %', 'Gap (pp)'], data.templateGap.gaps.map((g) => [g.bucket, g.current, g.target, g.gap])));
+        p4.appendChild(table(['Bucket', 'Current %', 'Target %', 'Gap (pp)'], data.templateGap.gaps.map((g) => [g.bucket, fmt2(g.current), fmt2(g.target), fmt2(g.gap)])));
         container.appendChild(p4);
 
         const p5 = panel('panel-m3uc7-screen');
         p5.appendChild(panelTitle('Personalised Screener', 'FR-PR-05 (Should Have): non-held stocks ranked by compatibility (conviction + diversification benefit) with your existing book.'));
-        p5.appendChild(table(['Stock', 'Sector', 'Conviction', 'Rating', 'Compatibility'], data.personalisedScreen.slice(0, 10).map((s) => [s.name, s.sector, s.convictionScore, tag(s.rating, ratingTagClass(s.rating)), s.compatibility])));
+        p5.appendChild(table(['Stock', 'Sector', 'Conviction', 'Rating', 'Compatibility'], data.personalisedScreen.slice(0, 10).map((s) => [s.name, s.sector, fmt2(s.convictionScore), tag(s.rating, ratingTagClass(s.rating)), fmt2(s.compatibility)])));
         container.appendChild(p5);
       },
       tour: [
@@ -581,7 +654,7 @@
             const roleSel = document.createElement('select'); roleSel.className = 'ui-select';
             (sample.roles || ['Retail Investor', 'Research Analyst', 'Relationship Manager', 'Admin']).forEach((r) => { const o = document.createElement('option'); o.value = r; o.textContent = r; roleSel.appendChild(o); });
             roleSel.addEventListener('change', () => { state.token = roleSel.value; });
-            wrap.appendChild(C.field('Role (mock token)', roleSel, 'FR-PL-02/03: stands in for a validated OAuth2/JWT token — resolves to the RBAC entitlement matrix below.'));
+            wrap.appendChild(C.field('Role (mock token)', roleSel, 'FR-PL-02/03: stands in for a validated OAuth2/JWT token — resolves to the RBAC (Role-Based Access Control) entitlement matrix below.'));
             wrap.appendChild(C.field('Search Query', C.textInput({ value: 'infy', onChange: (v) => { state.searchQuery = v; } }), 'FR-PL-06: ranked across instruments and themes.'));
             const addBtn = document.createElement('button'); addBtn.className = 'btn btn-secondary'; addBtn.textContent = 'Add INFY to Watchlist';
             addBtn.addEventListener('click', (e) => { e.preventDefault(); state.watchlistAction = 'add'; });
@@ -592,8 +665,16 @@
       },
       render(container, data) {
         container.innerHTML = '';
+        const featureCount = data.authResult.entitlements.features.includes('*') ? 'all platform features' : `${data.authResult.entitlements.features.length} feature area(s)`;
+        const hasHighSeverity = data.notifications.some((n) => n.severity === 'High');
+        container.appendChild(plainLanguagePanel('panel-m3uc8-plain',
+          `You're browsing as ${data.authResult.role}, with access to ${featureCount}. ${data.notifications.length} notification${data.notifications.length === 1 ? '' : 's'} ${data.notifications.length === 1 ? 'is' : 'are'} waiting in your feed.`,
+          hasHighSeverity
+            ? `At least one High-severity notification needs attention — check the Notification Centre below before assuming everything is business as usual.`
+            : `No High-severity notifications right now, but this is the layer that surfaces Module 2's portfolio alerts (drift, concentration, drawdown) as they happen, so it's worth checking regularly.`
+        ));
         const p1 = panel('panel-m3uc8-auth');
-        p1.appendChild(panelTitle('Auth & RBAC', 'FR-PL-02/03: token validated, role resolved, entitlements filtered by role.'));
+        p1.appendChild(panelTitle('Auth & RBAC', 'FR-PL-02/03: token validated, role resolved, entitlements filtered by role (RBAC).'));
         p1.appendChild(el('div', null, `<div>Role: <strong>${data.authResult.role}</strong> · Data scope: ${data.authResult.entitlements.dataScope}</div><div style="margin-top:6px">${data.authResult.entitlements.features.map((f) => tag(f, 'hold')).join(' ')}</div>`));
         container.appendChild(p1);
 
@@ -614,7 +695,7 @@
 
         const p5 = panel('panel-m3uc8-search');
         p5.appendChild(panelTitle('Global Search', 'FR-PL-06: autocomplete across instruments, reports, themes, ideas, ranked by relevance × entity weight.'));
-        p5.appendChild(data.searchResults.length ? table(['Type', 'Label', 'Rank'], data.searchResults.map((s) => [s.type, s.label, s.rank])) : el('div', 'empty-hint', 'No matches.'));
+        p5.appendChild(data.searchResults.length ? table(['Type', 'Label', 'Rank'], data.searchResults.map((s) => [s.type, s.label, fmt2(s.rank)])) : el('div', 'empty-hint', 'No matches.'));
         container.appendChild(p5);
       },
       tour: [

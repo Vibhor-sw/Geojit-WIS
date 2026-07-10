@@ -1263,11 +1263,11 @@ function computeIndexAttribution() {
     const closes = s.ohlcv.map((b) => b.close);
     const ret = pctChange(closes[closes.length - 1], closes[closes.length - 2]);
     const weight = INDEX_WEIGHTS[s.id];
-    return { id: s.id, name: s.name, weight: round2(weight * 1000) / 10, return: round2(ret * 10000) / 100, contributionBps: round2(weight * ret * 10000) };
+    return { id: s.id, name: s.name, weight: round2(weight * 100), return: round2(ret * 100), contributionBps: round2(weight * ret * 10000) };
   });
   const indexMove = contributions.reduce((a, c) => a + c.contributionBps, 0) / 100;
   const sorted = [...contributions].sort((a, b) => b.contributionBps - a.contributionBps);
-  return { indexMovePct: round2(indexMove * 100) / 100, topUp: sorted.slice(0, 5), topDown: sorted.slice(-5).reverse(), all: contributions };
+  return { indexMovePct: round2(indexMove), topUp: sorted.slice(0, 5), topDown: sorted.slice(-5).reverse(), all: contributions };
 }
 
 function computeSectorRotation() {
