@@ -97,7 +97,7 @@ function sectorKPIs(stock) {
 }
 
 // ---- Technical pillar ----
-function sma(arr, w, end) { let s = 0; for (let i = end - w + 1; i <= end; i++) s += arr[i]; return s / w; }
+function smaAt(arr, w, end) { let s = 0; for (let i = end - w + 1; i <= end; i++) s += arr[i]; return s / w; }
 function computeRSI(closes, period) {
   let gains = 0, losses = 0;
   for (let i = closes.length - period; i < closes.length; i++) {
@@ -142,14 +142,14 @@ function computeCombinationStrategies(isin) {
 function computeTechnical(stock) {
   const closes = stock.ohlcv.map((b) => b.close);
   const n = closes.length - 1;
-  const ma50 = sma(closes, 50, n), ma200 = sma(closes, 200, n);
+  const ma50 = smaAt(closes, 50, n), ma200 = smaAt(closes, 200, n);
   const rsi14 = computeRSI(closes, 14);
   const macd = computeMACD(closes);
   const bb = computeBollinger(closes);
   const goldenCross = ma50 > ma200;
   const obv = stock.ohlcv.reduce((acc, b, i) => i === 0 ? b.volume : acc + (b.close > stock.ohlcv[i - 1].close ? b.volume : -b.volume), 0);
   const patterns = [];
-  if (goldenCross && closes[n - 20] < sma(closes, 50, n - 20)) patterns.push('Golden Cross (50/200 EMA)');
+  if (goldenCross && closes[n - 20] < smaAt(closes, 50, n - 20)) patterns.push('Golden Cross (50/200 EMA)');
   if (rsi14 < 30) patterns.push('RSI Oversold Reversal Setup');
   if (rsi14 > 70) patterns.push('RSI Overbought — Momentum Extended');
   if (bb.squeeze) patterns.push('Bollinger Squeeze — Breakout Watch');

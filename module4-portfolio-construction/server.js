@@ -24,7 +24,20 @@ app.use('/api/m3uc6', require('./src/routes/m3uc6'));
 app.use('/api/m3uc7', require('./src/routes/m3uc7'));
 app.use('/api/m3uc8', require('./src/routes/m3uc8'));
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok', modules: ['Module 3 - Research & Recommendation Platform', 'Module 4 - Portfolio Construction & Financial Planning'] }));
+app.use('/api/m5uc1', require('./src/routes/m5uc1'));
+app.use('/api/m5uc2', require('./src/routes/m5uc2'));
+app.use('/api/m5uc3', require('./src/routes/m5uc3'));
+app.use('/api/m5uc4', require('./src/routes/m5uc4'));
+app.use('/api/m5uc5', require('./src/routes/m5uc5'));
+app.use('/api/m5uc6', require('./src/routes/m5uc6'));
+app.use('/api/m5uc7', require('./src/routes/m5uc7'));
+app.use('/api/m5uc8', require('./src/routes/m5uc8'));
+app.use('/api/m5uc9', require('./src/routes/m5uc9'));
+app.use('/api/m5uc10', require('./src/routes/m5uc10'));
+app.use('/api/m5uc11', require('./src/routes/m5uc11'));
+app.use('/api/m5uc12', require('./src/routes/m5uc12'));
+
+app.get('/api/health', (req, res) => res.json({ status: 'ok', modules: ['Module 3 - Research & Recommendation Platform', 'Module 4 - Portfolio Construction & Financial Planning', 'Module 5 - Security Selection, Valuation & Market Forecasting'] }));
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));

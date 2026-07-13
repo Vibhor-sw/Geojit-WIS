@@ -8,6 +8,7 @@
   const MODULES = [
     { key: 'module3', title: 'Module 3: Research & Recommendation Platform', useCases: window.WISUseCasesM3 || [] },
     { key: 'module4', title: 'Module 4: Portfolio Construction & Financial Planning', useCases: window.WISUseCases || [] },
+    { key: 'module5', title: 'Module 5: Security Selection, Valuation & Market Forecasting', useCases: window.WISUseCasesM5 || [] },
   ];
   const ALL_USE_CASES = MODULES.reduce((a, m) => a.concat(m.useCases), []);
   function findUseCase(key) { return ALL_USE_CASES.find((u) => u.key === key); }
