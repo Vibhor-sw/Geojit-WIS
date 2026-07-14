@@ -37,7 +37,14 @@ app.use('/api/m5uc10', require('./src/routes/m5uc10'));
 app.use('/api/m5uc11', require('./src/routes/m5uc11'));
 app.use('/api/m5uc12', require('./src/routes/m5uc12'));
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok', modules: ['Module 3 - Research & Recommendation Platform', 'Module 4 - Portfolio Construction & Financial Planning', 'Module 5 - Security Selection, Valuation & Market Forecasting'] }));
+app.use('/api/m6uc1', require('./src/routes/m6uc1'));
+app.use('/api/m6uc2', require('./src/routes/m6uc2'));
+app.use('/api/m6uc3', require('./src/routes/m6uc3'));
+app.use('/api/m6uc4', require('./src/routes/m6uc4'));
+app.use('/api/m6uc5', require('./src/routes/m6uc5'));
+app.use('/api/m6uc6', require('./src/routes/m6uc6'));
+
+app.get('/api/health', (req, res) => res.json({ status: 'ok', modules: ['Module 3 - Research & Recommendation Platform', 'Module 4 - Portfolio Construction & Financial Planning', 'Module 5 - Security Selection, Valuation & Market Forecasting', 'Module 6 - Risk Management & Stress Testing'] }));
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));

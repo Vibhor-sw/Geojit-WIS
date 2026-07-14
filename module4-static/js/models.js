@@ -3988,6 +3988,1232 @@ function runSentimentSignal(payload) {
     m5uc12: { stockId: 'INFY', universe: STOCK_UNIVERSE.map((s) => ({ id: s.id, name: s.name })) },
   };
 
+  
+  // ---- mathUtils.js functions not already present in the M4 static baseline ----
+  function cholesky(Sigma) {
+    const n = Sigma.length;
+    const L = Array.from({ length: n }, () => new Array(n).fill(0));
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j <= i; j++) {
+        let sum = 0;
+        for (let k = 0; k < j; k++) sum += L[i][k] * L[j][k];
+        if (i === j) {
+          const val = Sigma[i][i] - sum;
+          L[i][j] = Math.sqrt(Math.max(val, 1e-12));
+        } else {
+          L[i][j] = (Sigma[i][j] - sum) / (L[j][j] || 1e-12);
+        }
+      }
+    }
+    return L;
+  }
+  function std(arr) {
+    const m = mean(arr);
+    return Math.sqrt(arr.reduce((a, b) => a + (b - m) * (b - m), 0) / arr.length);
+  }
+  function normCdf(x) {
+    const t = 1 / (1 + 0.2316419 * Math.abs(x));
+    const d = 0.3989423 * Math.exp((-x * x) / 2);
+    let p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+    if (x > 0) p = 1 - p;
+    return p;
+  }
+  function sampleCovariance(returnRows) {
+    const n = returnRows.length, k = returnRows[0].length;
+    const means = new Array(k).fill(0);
+    for (const row of returnRows) for (let j = 0; j < k; j++) means[j] += row[j] / n;
+    const Sigma = Array.from({ length: k }, () => new Array(k).fill(0));
+    for (const row of returnRows) {
+      for (let i = 0; i < k; i++)
+        for (let j = 0; j < k; j++)
+          Sigma[i][j] += (row[i] - means[i]) * (row[j] - means[j]) / (n - 1);
+    }
+    return Sigma;
+  }
+
+
+// Module 6 shared risk core: portfolio positions, return matrix, covariance and portfolio-return
+// series reused across VaR (UC1), factor decomposition (UC2) and stress testing (UC3), per the
+// spec's "single covariance/factor-model core" build note. Built on the real 21-stock equity book
+// (Module 4's REAL_HOLDINGS filtered to type STOCK) and the same synthetic 260-day price history
+// used across Modules 3/4/5, so risk numbers are computed from genuine historical returns, not
+// fabricated volatility inputs.
+
+function findStock(id) {
+  const s = STOCK_UNIVERSE.find((x) => x.id === id);
+  if (!s) throw new Error(`Unknown stock id: ${id}`);
+  return s;
+}
+
+// The equity sleeve of the real portfolio: 21 real stock holdings, each matched to its full
+// 260-day OHLCV history in STOCK_UNIVERSE.
+function equityPositions() {
+  const stocks = REAL_HOLDINGS.filter((h) => h.type === 'STOCK');
+  const marketValues = stocks.map((h) => h.qty * h.currentPrice);
+  const totalMv = marketValues.reduce((a, b) => a + b, 0);
+  return stocks.map((h, i) => {
+    const stock = findStock(h.id);
+    return {
+      id: h.id, name: h.name, sector: h.sector, macap: h.macap,
+      qty: h.qty, currentPrice: h.currentPrice, marketValue: round2(marketValues[i]),
+      weight: marketValues[i] / totalMv, closes: stock.ohlcv.map((b) => b.close),
+      dates: stock.ohlcv.map((b) => b.date),
+    };
+  });
+}
+
+function dailyReturnsFromCloses(closes) {
+  const r = [];
+  for (let i = 1; i < closes.length; i++) r.push(closes[i] / closes[i - 1] - 1);
+  return r;
+}
+
+// Return matrix: rows = trading days, columns = positions (aligned; all stocks share the same
+// 260-day date grid in this synthetic dataset).
+function buildReturnMatrix(positions) {
+  const seriesByPos = positions.map((p) => dailyReturnsFromCloses(p.closes));
+  const nDays = seriesByPos[0].length;
+  const rows = [];
+  for (let t = 0; t < nDays; t++) rows.push(seriesByPos.map((s) => s[t]));
+  return { rows, dates: positions[0].dates.slice(1) };
+}
+
+function portfolioReturnSeries(returnRows, weights) {
+  return returnRows.map((row) => row.reduce((s, r, i) => s + r * weights[i], 0));
+}
+
+// Equal-weighted-by-index-weight benchmark return series over the same universe/date grid, as a
+// stand-in for "the market" (used by UC2's active-risk/tracking-error decomposition).
+function benchmarkReturnSeries() {
+  const positions = STOCK_UNIVERSE.map((s) => ({ id: s.id, closes: s.ohlcv.map((b) => b.close), dates: s.ohlcv.map((b) => b.date) }));
+  const { rows } = buildReturnMatrix(positions);
+  const weights = positions.map((p) => INDEX_WEIGHTS[p.id] || 1 / positions.length);
+  const wSum = weights.reduce((a, b) => a + b, 0);
+  const wNorm = weights.map((w) => w / wSum);
+  return portfolioReturnSeries(rows, wNorm);
+}
+
+function riskCoreForPortfolio(shrinkage) {
+  const positions = equityPositions();
+  const { rows, dates } = buildReturnMatrix(positions);
+  const weights = positions.map((p) => p.weight);
+  const rawSigma = sampleCovariance(rows);
+  const sigma = shrinkage > 0 ? shrinkCovariance(rawSigma, shrinkage) : rawSigma;
+  const portReturns = portfolioReturnSeries(rows, weights);
+  return { positions, rows, dates, weights, sigma, portReturns };
+}
+
+
+
+// M6-UC1 — VaR/CVaR & Tail Risk. Parametric (with Cornish-Fisher fat-tail adjustment), historical
+// simulation, and Monte Carlo (multivariate Student-t) VaR/CVaR on the real 21-stock equity book;
+// component/marginal/incremental VaR attribution; EVT (Peaks-Over-Threshold / GPD) tail metrics;
+// Kupiec proportion-of-failures + Christoffersen independence backtesting; a what-if VaR delta for
+// a hypothetical trade. Reuses the shared covariance core from m6RiskCore.js (spec's "single
+// covariance/factor-model core" build note).
+
+// Binary-search inverse standard normal CDF (probit), driven off the existing forward normCdf.
+function invNormCdf(p) {
+  let lo = -8, hi = 8;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    if (normCdf(mid) < p) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+function skewKurt(returns) {
+  const m = mean(returns), sd = std(returns) || 1e-9;
+  const n = returns.length;
+  const skew = returns.reduce((a, r) => a + ((r - m) / sd) ** 3, 0) / n;
+  const kurt = returns.reduce((a, r) => a + ((r - m) / sd) ** 4, 0) / n - 3; // excess kurtosis
+  return { skew, kurt };
+}
+
+// Cornish-Fisher expansion: adjusts the normal z-quantile for sample skewness/kurtosis, a
+// standard "modified VaR" technique for fat-tailed parametric VaR (satisfies FR-VR-03's
+// "not normal-only" requirement without a full Student-t quantile function).
+function cornishFisherZ(z, skew, kurt) {
+  return z + (z ** 2 - 1) * skew / 6 + (z ** 3 - 3 * z) * kurt / 24 - (2 * z ** 3 - 5 * z) * skew ** 2 / 36;
+}
+
+function portfolioValue(positions) {
+  return positions.reduce((a, p) => a + p.marketValue, 0);
+}
+
+function parametricVar(portReturns, confidence, horizonDays, portValue) {
+  const sigma = std(portReturns);
+  const mu = mean(portReturns);
+  const z = invNormCdf(confidence);
+  const { skew, kurt } = skewKurt(portReturns);
+  const zCf = cornishFisherZ(z, skew, kurt);
+  const scale = Math.sqrt(horizonDays);
+  const varNormalPct = (z * sigma - mu) * scale;
+  const varFatTailPct = (zCf * sigma - mu) * scale;
+  // CVaR for the normal case has a closed form: mu + sigma * phi(z)/(1-confidence).
+  const phiZ = Math.exp(-z * z / 2) / Math.sqrt(2 * Math.PI);
+  const cvarNormalPct = (phiZ * sigma / (1 - confidence) - mu) * scale;
+  return {
+    varPct: round2(varFatTailPct * 100), varNormalOnlyPct: round2(varNormalPct * 100),
+    cvarPct: round2(cvarNormalPct * 100 * (varFatTailPct / (varNormalPct || 1e-9))), // fat-tail-scaled CVaR proxy
+    varAmount: round2(varFatTailPct * portValue), cvarAmount: round2(varFatTailPct * portValue * (cvarNormalPct / (varNormalPct || 1e-9))),
+    skew: round2(skew), excessKurtosis: round2(kurt), z: round2(z), zCornishFisher: round2(zCf),
+  };
+}
+
+function historicalVar(portReturns, confidence, horizonDays, portValue) {
+  const losses = portReturns.map((r) => -r).sort((a, b) => a - b).reverse(); // largest loss first
+  const idx = Math.floor((1 - confidence) * losses.length);
+  const varDaily = losses[Math.min(idx, losses.length - 1)];
+  const tailLosses = losses.slice(0, Math.max(1, idx));
+  const cvarDaily = mean(tailLosses);
+  // Horizon scaling via sqrt(h) is a documented simplification (naive for fat tails per the
+  // spec's own caution) — flagged explicitly in the coachmark tour rather than silently applied.
+  const scale = Math.sqrt(horizonDays);
+  return { varPct: round2(varDaily * scale * 100), cvarPct: round2(cvarDaily * scale * 100), varAmount: round2(varDaily * scale * portValue), cvarAmount: round2(cvarDaily * scale * portValue) };
+}
+
+// Multivariate Student-t Monte Carlo via the normal-variance-mixture representation:
+// t = mu + sqrt(df / chiSq_df) * N(0, Sigma), which reduces to correlated fat-tailed draws
+// without needing a closed-form multivariate-t quantile function.
+function monteCarloVar(rows, weights, confidence, horizonDays, portValue, paths, tDf, seed) {
+  const rng = makeRng(seed);
+  const n = weights.length;
+  const means = new Array(n).fill(0).map((_, j) => mean(rows.map((r) => r[j])));
+  const sigmaCov = sampleCovariance(rows);
+  const L = cholesky(sigmaCov);
+  const simReturns = [];
+  for (let p = 0; p < paths; p++) {
+    let chiSq = 0;
+    for (let k = 0; k < tDf; k++) chiSq += randn(rng) ** 2;
+    const tScale = Math.sqrt(tDf / chiSq);
+    const z = new Array(n).fill(0).map(() => randn(rng));
+    let portRet = 0;
+    for (let i = 0; i < n; i++) {
+      let s = means[i];
+      for (let k = 0; k <= i; k++) s += tScale * L[i][k] * z[k];
+      portRet += s * weights[i];
+    }
+    simReturns.push(portRet);
+  }
+  const losses = simReturns.map((r) => -r).sort((a, b) => a - b).reverse();
+  const idx = Math.floor((1 - confidence) * losses.length);
+  const varDaily = losses[Math.min(idx, losses.length - 1)];
+  const cvarDaily = mean(losses.slice(0, Math.max(1, idx)));
+  const scale = Math.sqrt(horizonDays);
+  return { varPct: round2(varDaily * scale * 100), cvarPct: round2(cvarDaily * scale * 100), varAmount: round2(varDaily * scale * portValue), cvarAmount: round2(cvarDaily * scale * portValue), paths, tDegreesOfFreedom: tDf };
+}
+
+// EVT / Peaks-Over-Threshold: fit a Generalised Pareto Distribution to losses above a threshold
+// via method-of-moments (mean and variance of the excesses), then derive VaR/CVaR/tail-index from
+// the fitted GPD — the spec's FR-VR-03 fat-tail requirement.
+function evtTail(portReturns, confidence, thresholdPercentile) {
+  const losses = portReturns.map((r) => -r).sort((a, b) => a - b);
+  const n = losses.length;
+  const uIdx = Math.floor(thresholdPercentile * n);
+  const u = losses[uIdx];
+  const excesses = losses.slice(uIdx).map((l) => l - u).filter((e) => e > 0);
+  const nu = excesses.length;
+  const m = mean(excesses), v = std(excesses) ** 2;
+  const xi = 0.5 * (1 - (m * m) / (v || 1e-9));
+  const beta = 0.5 * m * ((m * m) / (v || 1e-9) + 1);
+  const p = 1 - confidence;
+  const varGpd = xi !== 0
+    ? u + (beta / xi) * (((n / nu) * p) ** (-xi) - 1)
+    : u + beta * Math.log(nu / (n * p));
+  const cvarGpd = xi < 1 ? (varGpd + beta - xi * u) / (1 - xi) : varGpd * 1.5;
+  return {
+    thresholdPct: round2(thresholdPercentile * 100), threshold: round2(u * 100), exceedances: nu,
+    tailIndex: round2(xi), scaleBeta: round2(beta), evtVarPct: round2(varGpd * 100), evtCvarPct: round2(cvarGpd * 100),
+    regime: xi > 0.1 ? 'Heavy-tailed (fat tail, unbounded)' : xi > -0.1 ? 'Near-exponential tail' : 'Bounded/thin tail',
+  };
+}
+
+function componentVar(sigma, weights, confidence, portReturns) {
+  const z = invNormCdf(confidence);
+  const sigmaW = matVec(sigma, weights); // (Sigma * w)
+  const portVar = weights.reduce((a, w, i) => a + w * sigmaW[i], 0);
+  const portVol = Math.sqrt(Math.max(portVar, 1e-12));
+  const marginal = sigmaW.map((sw) => (z * sw) / portVol); // ∂VaR/∂w_i
+  const component = marginal.map((mv, i) => mv * weights[i]);
+  return { marginal, component, portVol };
+}
+
+// Incremental VaR: fully removing position i, renormalising remaining weights, and recomputing
+// portfolio VaR from the covariance sub-matrix — the change vs total VaR from that position's
+// presence in the book.
+function incrementalVar(sigma, weights, confidence, totalVarPct) {
+  const n = weights.length;
+  const z = invNormCdf(confidence);
+  return weights.map((_, dropIdx) => {
+    const idxs = weights.map((_, i) => i).filter((i) => i !== dropIdx);
+    const subSigma = idxs.map((i) => idxs.map((j) => sigma[i][j]));
+    const subW = idxs.map((i) => weights[i]);
+    const wSum = subW.reduce((a, b) => a + b, 0) || 1;
+    const wNorm = subW.map((w) => w / wSum);
+    const sigmaW = matVec(subSigma, wNorm);
+    const portVar = wNorm.reduce((a, w, i) => a + w * sigmaW[i], 0);
+    const varWithout = z * Math.sqrt(Math.max(portVar, 1e-12)) * 100;
+    return round2(totalVarPct - varWithout);
+  });
+}
+
+function kupiecTest(exceptions, obs, expectedRate) {
+  const x = exceptions, n = obs, p = expectedRate;
+  const xClamped = Math.max(1e-6, Math.min(n - 1e-6, x));
+  const logL1 = (n - xClamped) * Math.log(1 - p) + xClamped * Math.log(p);
+  const rHat = xClamped / n;
+  const logL0 = (n - xClamped) * Math.log(1 - rHat) + xClamped * Math.log(rHat);
+  const lr = -2 * (logL1 - logL0);
+  return { statistic: round2(lr), criticalValue995: 3.84, pass: lr < 3.84, exceptionRate: round2((x / n) * 100), expectedRate: round2(p * 100) };
+}
+
+function christoffersenTest(exceedFlags) {
+  let n00 = 0, n01 = 0, n10 = 0, n11 = 0;
+  for (let i = 1; i < exceedFlags.length; i++) {
+    const prev = exceedFlags[i - 1], cur = exceedFlags[i];
+    if (prev === 0 && cur === 0) n00++;
+    else if (prev === 0 && cur === 1) n01++;
+    else if (prev === 1 && cur === 0) n10++;
+    else n11++;
+  }
+  const pi01 = n01 / (n00 + n01 || 1), pi11 = n11 / (n10 + n11 || 1);
+  const pi = (n01 + n11) / (n00 + n01 + n10 + n11 || 1);
+  const safeLog = (x) => Math.log(Math.max(x, 1e-9));
+  const logLc = (n00 + n10) * safeLog(1 - pi) + (n01 + n11) * safeLog(pi);
+  const logLu = n00 * safeLog(1 - pi01) + n01 * safeLog(pi01) + n10 * safeLog(1 - pi11) + n11 * safeLog(pi11);
+  const lr = -2 * (logLc - logLu);
+  return { statistic: round2(lr), criticalValue: 3.84, pass: lr < 3.84, note: 'Tests whether VaR exceptions cluster in time rather than occurring independently.' };
+}
+
+function runVarCvar(payload) {
+  const p = payload || {};
+  const confidence = p.confidence || 0.95;
+  const horizonDays = p.horizonDays || 1;
+  const shrinkage = p.shrinkage != null ? p.shrinkage : 0.2;
+  const mcPaths = p.mcPaths || 3000;
+  const tDf = p.tDegreesOfFreedom || 5;
+  const evtThresholdPct = p.evtThresholdPercentile != null ? p.evtThresholdPercentile : 0.90;
+
+  const core = riskCoreForPortfolio(shrinkage);
+  const portValue = portfolioValue(core.positions);
+
+  const parametric = parametricVar(core.portReturns, confidence, horizonDays, portValue);
+  const historical = historicalVar(core.portReturns, confidence, horizonDays, portValue);
+  const montecarlo = monteCarloVar(core.rows, core.weights, confidence, horizonDays, portValue, mcPaths, tDf, 42);
+  const evt = evtTail(core.portReturns, confidence, evtThresholdPct);
+
+  const { marginal, component, portVol } = componentVar(core.sigma, core.weights, confidence, core.portReturns);
+  const incremental = incrementalVar(core.sigma, core.weights, confidence, parametric.varPct);
+  const attribution = core.positions.map((pos, i) => ({
+    id: pos.id, name: pos.name, sector: pos.sector, weightPct: round2(pos.weight * 100),
+    marginalVarPct: round2(marginal[i] * 100), componentVarPct: round2(component[i] * 100), incrementalVarPct: incremental[i],
+  })).sort((a, b) => b.componentVarPct - a.componentVarPct);
+
+  // Backtest: static parametric VaR (99% confidence, 1-day) evaluated against each day's actual
+  // portfolio loss across the full 259-day sample. A genuine exception count, honestly a
+  // single-window check rather than a rolling out-of-sample backtest (flagged in the tour).
+  const btConfidence = 0.99;
+  const btZ = invNormCdf(btConfidence);
+  const btSigma = std(core.portReturns), btMu = mean(core.portReturns);
+  const staticVarDaily = btZ * btSigma - btMu;
+  const exceedFlags = core.portReturns.map((r) => (-r > staticVarDaily ? 1 : 0));
+  const exceptions = exceedFlags.reduce((a, b) => a + b, 0);
+  const kupiec = kupiecTest(exceptions, exceedFlags.length, 1 - btConfidence);
+  const christoffersen = christoffersenTest(exceedFlags);
+
+  // What-if VaR: apply a hypothetical trade (buy/sell on one position, expressed as a weight
+  // delta) and recompute parametric portfolio VaR with the adjusted, renormalised weights.
+  let whatIfVar = null;
+  if (p.whatIf && p.whatIf.stockId) {
+    const idx = core.positions.findIndex((pos) => pos.id === p.whatIf.stockId);
+    if (idx >= 0) {
+      const deltaWeight = (p.whatIf.tradeValue || 0) / portValue;
+      const newWeights = core.weights.slice();
+      newWeights[idx] += deltaWeight;
+      const wSum = newWeights.reduce((a, b) => a + b, 0);
+      const wNorm = newWeights.map((w) => w / wSum);
+      const sigmaW = matVec(core.sigma, wNorm);
+      const newPortVar = wNorm.reduce((a, w, i) => a + w * sigmaW[i], 0);
+      const newVarPct = round2(invNormCdf(confidence) * Math.sqrt(Math.max(newPortVar, 1e-12)) * 100);
+      whatIfVar = { stockId: p.whatIf.stockId, tradeValue: p.whatIf.tradeValue, varBeforePct: parametric.varNormalOnlyPct, varAfterPct: newVarPct, deltaVarPct: round2(newVarPct - parametric.varNormalOnlyPct) };
+    }
+  }
+
+  return {
+    portfolio: { positionCount: core.positions.length, portfolioValue: round2(portValue), confidence, horizonDays },
+    var: { parametric: { pct: parametric.varPct, amount: parametric.varAmount, normalOnlyPct: parametric.varNormalOnlyPct }, historical: { pct: historical.varPct, amount: historical.varAmount }, montecarlo: { pct: montecarlo.varPct, amount: montecarlo.varAmount, paths: montecarlo.paths, tDegreesOfFreedom: montecarlo.tDegreesOfFreedom } },
+    cvar: { parametric: { pct: parametric.cvarPct, amount: parametric.cvarAmount }, historical: { pct: historical.cvarPct, amount: historical.cvarAmount }, montecarlo: { pct: montecarlo.cvarPct, amount: montecarlo.cvarAmount } },
+    riskAttribution: { table: attribution, portfolioVolDailyPct: round2(portVol * 100) },
+    tailMetrics: evt,
+    backtest: { observations: exceedFlags.length, exceptions, kupiec, christoffersen, confidence: btConfidence },
+    whatIfVar,
+    fatTailDiagnostics: { skew: parametric.skew, excessKurtosis: parametric.excessKurtosis, zNormal: parametric.z, zCornishFisher: parametric.zCornishFisher },
+  };
+}
+
+
+
+// M6-UC2 — Factor Risk Decomposition. A fundamental factor-risk model over the full Module 3/5
+// stock universe (the same value/quality/momentum/lowvol/growth/size factors as M5-UC1, per the
+// spec's "consistent factor taxonomy" instruction): factor loadings B come from M5-UC1's own
+// cross-sectional z-scoring; factor returns are recovered day-by-day via cross-sectional OLS
+// (Barra-style), giving a genuine factor-covariance matrix F and per-stock specific risk D, not
+// assumed/fabricated numbers. Portfolio risk = systematic (factor) + specific (idiosyncratic);
+// active risk (tracking error) vs the cap-weighted universe benchmark decomposes the same way.
+
+function dailyReturnsFromCloses(closes) {
+  const r = [];
+  for (let i = 1; i < closes.length; i++) r.push(closes[i] / closes[i - 1] - 1);
+  return r;
+}
+
+function buildFactorModel(sectorNeutral) {
+  const zTable = computeFactorTable(sectorNeutral, 3);
+  const B = STOCK_UNIVERSE.map((s) => FACTOR_KEYS.map((k) => zTable[s.id][k]));
+  const returnRows = STOCK_UNIVERSE.map((s) => dailyReturnsFromCloses(s.ohlcv.map((b) => b.close)));
+  const nDays = returnRows[0].length;
+  // Cross-sectional OLS projection matrix P = (BᵀB)⁻¹Bᵀ, applied to each day's return vector to
+  // recover that day's factor returns f_t -- the standard Barra-style fundamental factor model.
+  const Bt = transpose(B);
+  const BtB = matMul(Bt, B);
+  const BtBinv = invert(BtB);
+  const P = matMul(BtBinv, Bt); // 6 x n
+  const factorReturnRows = []; // nDays x 6
+  const specificReturns = STOCK_UNIVERSE.map(() => []); // n x nDays
+  for (let t = 0; t < nDays; t++) {
+    const rVec = returnRows.map((r) => r[t]);
+    const fVec = matVec(P, rVec); // 6x1
+    factorReturnRows.push(fVec);
+    const fitted = matVec(B, fVec); // n x1, B * f_t
+    rVec.forEach((r, i) => specificReturns[i].push(r - fitted[i]));
+  }
+  const F = sampleCovariance(factorReturnRows); // 6x6 factor covariance
+  const D = specificReturns.map((series) => std(series) ** 2); // per-stock specific variance
+  return { B, F, D, ids: STOCK_UNIVERSE.map((s) => s.id), factorReturnRows, specificReturns };
+}
+
+function fullWeightVector(idOrder, weightById) {
+  return idOrder.map((id) => weightById[id] || 0);
+}
+
+function riskDecompose(w, B, F, D) {
+  const Bt = transpose(B);
+  const exposure = matVec(Bt, w); // 6x1 portfolio factor exposure
+  const Fexposure = matVec(F, exposure);
+  const systematicVar = exposure.reduce((a, e, k) => a + e * Fexposure[k], 0);
+  const specificVar = w.reduce((a, wi, i) => a + wi * wi * D[i], 0);
+  const totalVar = systematicVar + specificVar;
+  const factorContribution = exposure.map((e, k) => e * Fexposure[k]);
+  return { exposure, systematicVar, specificVar, totalVar, factorContribution };
+}
+
+function runFactorRisk(payload) {
+  const p = payload || {};
+  const sectorNeutral = p.sectorNeutral !== false;
+  const unintendedThreshold = p.unintendedThreshold != null ? p.unintendedThreshold : 0.5;
+
+  const model = buildFactorModel(sectorNeutral);
+  const { B, F, D, ids } = model;
+
+  const stockPositions = REAL_HOLDINGS.filter((h) => h.type === 'STOCK');
+  const mvById = {};
+  stockPositions.forEach((h) => { mvById[h.id] = h.qty * h.currentPrice; });
+  const totalMv = Object.values(mvById).reduce((a, b) => a + b, 0);
+  const wPortById = {}; Object.keys(mvById).forEach((id) => { wPortById[id] = mvById[id] / totalMv; });
+
+  const indexSum = Object.values(INDEX_WEIGHTS).reduce((a, b) => a + b, 0);
+  const wBenchById = {}; Object.keys(INDEX_WEIGHTS).forEach((id) => { wBenchById[id] = INDEX_WEIGHTS[id] / indexSum; });
+
+  const wPort = fullWeightVector(ids, wPortById);
+  const wBench = fullWeightVector(ids, wBenchById);
+  const wActive = wPort.map((w, i) => w - wBench[i]);
+
+  const portRisk = riskDecompose(wPort, B, F, D);
+  const benchRisk = riskDecompose(wBench, B, F, D);
+  const activeRisk = riskDecompose(wActive, B, F, D);
+
+  const portVol = Math.sqrt(Math.max(portRisk.totalVar, 0)) * Math.sqrt(252);
+  const benchVol = Math.sqrt(Math.max(benchRisk.totalVar, 0)) * Math.sqrt(252);
+  const trackingErrorAnnual = Math.sqrt(Math.max(activeRisk.totalVar, 0)) * Math.sqrt(252);
+
+  const factorExposureTable = FACTOR_KEYS.map((k, i) => ({
+    factor: k, portfolioExposure: round2(portRisk.exposure[i]), benchmarkExposure: round2(benchRisk.exposure[i]),
+    activeExposure: round2(wActive.length ? matVec(transpose(B), wActive)[i] : 0),
+    riskContributionPct: round2((portRisk.factorContribution[i] / (portRisk.totalVar || 1e-9)) * 100),
+  }));
+
+  const activeExposureVec = matVec(transpose(B), wActive);
+  const teFactorContribution = FACTOR_KEYS.map((k, i) => {
+    const Fexp = matVec(F, activeExposureVec)[i];
+    return { factor: k, contribution: activeExposureVec[i] * Fexp };
+  });
+  const teDecomposition = teFactorContribution.map((r) => ({ factor: r.factor, contributionPct: round2((r.contribution / (activeRisk.totalVar || 1e-9)) * 100) }));
+
+  const unintendedExposures = factorExposureTable.filter((r) => Math.abs(r.activeExposure) > unintendedThreshold)
+    .map((r) => ({ factor: r.factor, activeExposure: r.activeExposure, note: `${Math.abs(r.activeExposure).toFixed(2)}-sigma ${r.activeExposure > 0 ? 'overweight' : 'underweight'} tilt vs benchmark on ${r.factor} — check if this is a deliberate view.` }));
+
+  const riskContributions = factorExposureTable.map((r) => ({ factor: r.factor, portfolioContributionPct: r.riskContributionPct }))
+    .concat([{ factor: 'Specific (idiosyncratic)', portfolioContributionPct: round2((portRisk.specificVar / (portRisk.totalVar || 1e-9)) * 100) }])
+    .sort((a, b) => b.portfolioContributionPct - a.portfolioContributionPct);
+
+  return {
+    riskSplit: {
+      portfolioVolAnnualPct: round2(portVol * 100), benchmarkVolAnnualPct: round2(benchVol * 100), trackingErrorAnnualPct: round2(trackingErrorAnnual * 100),
+      systematicPctOfVar: round2((portRisk.systematicVar / (portRisk.totalVar || 1e-9)) * 100), specificPctOfVar: round2((portRisk.specificVar / (portRisk.totalVar || 1e-9)) * 100),
+    },
+    factorExposures: factorExposureTable,
+    riskDecomposition: { table: riskContributions },
+    trackingError: { annualPct: round2(trackingErrorAnnual * 100), factorContribution: teDecomposition },
+    riskContributions,
+    unintendedExposures,
+    modelNote: 'Factor returns are recovered via a daily cross-sectional OLS regression of stock returns on static factor loadings (fundamental Barra-style approach) over the full stock universe, sector-neutral by default. Static loadings are a simplification -- a production model would refresh loadings each rebalance.',
+    factorSet: FACTOR_KEYS, sectorNeutral,
+  };
+}
+
+
+
+// M6-UC3 — Macro Scenario & Stress Testing. Revalues the real equity book under a library of
+// historical-calibrated and hypothetical macro shocks (equity, rates, FX, credit spreads), using
+// per-stock sensitivities (market beta from genuine regression against the universe benchmark;
+// sector-based rate/FX/credit sensitivities, documented as illustrative assumptions absent a
+// licensed multi-factor macro model). Shocks propagate through an assumed macro-factor covariance
+// via Cholesky, consistent with the spec's "correlated propagation" requirement. Reverse-stress
+// solves, in closed form, the minimal Mahalanobis-norm shock that breaches a loss threshold.
+// Regime context (M5-UC10) weights each scenario's plausibility, per the spec's cross-module note.
+
+const FACTORS = ['equity', 'rate', 'fx', 'credit'];
+
+// Illustrative macro-factor correlation (not a licensed multi-asset covariance feed): equity and
+// credit spreads move together in stress (positive corr on spread-widening vs equity fall, hence
+// negative equity/credit corr here since credit is expressed as a spread shock); rates and FX have
+// a modest positive relationship (rate hikes often coincide with a firmer currency).
+const MACRO_CORR = [
+  [1.00, -0.10, 0.35, -0.55],
+  [-0.10, 1.00, 0.25, -0.15],
+  [0.35, 0.25, 1.00, -0.20],
+  [-0.55, -0.15, -0.20, 1.00],
+];
+const MACRO_VOL = { equity: 0.18, rate: 0.012, fx: 0.06, credit: 0.015 }; // annualised illustrative shock-unit vols
+function macroCovariance() {
+  const vols = FACTORS.map((f) => MACRO_VOL[f]);
+  return MACRO_CORR.map((row, i) => row.map((c, j) => c * vols[i] * vols[j]));
+}
+
+// Historical-calibrated and hypothetical scenarios, as factor-shock vectors. Magnitudes are
+// illustrative, sized to the broad order of the named historical episode (a production build
+// would calibrate directly to the realised factor moves over the named window).
+const SCENARIO_LIBRARY = [
+  { id: 'gfc2008', name: 'Global Financial Crisis (2008)', type: 'historical', bias: 'bearish', shocks: { equity: -0.55, rate: -0.020, fx: 0.20, credit: 0.030 } },
+  { id: 'covid2020', name: 'COVID-19 Crash (Mar 2020)', type: 'historical', bias: 'bearish', shocks: { equity: -0.38, rate: -0.010, fx: 0.08, credit: 0.015 } },
+  { id: 'taper2013', name: 'Taper Tantrum (2013)', type: 'historical', bias: 'bearish', shocks: { equity: -0.15, rate: 0.015, fx: 0.12, credit: 0.008 } },
+  { id: 'demon2016', name: 'Demonetisation (Nov 2016)', type: 'historical', bias: 'neutral', shocks: { equity: -0.08, rate: -0.0025, fx: 0.02, credit: 0.002 } },
+  { id: 'rateshock', name: 'Hypothetical: Aggressive RBI Rate Hike (+200bps)', type: 'hypothetical', bias: 'bearish', shocks: { equity: -0.10, rate: 0.020, fx: 0.03, credit: 0.005 } },
+  { id: 'oilspike', name: 'Hypothetical: Oil Price Spike + INR Depreciation', type: 'hypothetical', bias: 'bearish', shocks: { equity: -0.12, rate: 0.005, fx: 0.10, credit: 0.006 } },
+];
+
+// Sector-based rate/FX/credit sensitivities -- illustrative assumptions (documented in the tour)
+// standing in for a licensed multi-factor macro-sensitivity feed. Sign convention: sensitivity is
+// the fractional price impact per unit (100%) of the named shock.
+const SECTOR_SENSITIVITY = {
+  'Financial Services': { rate: -0.9, fx: -0.1, credit: -1.4 },
+  'Information Technology': { rate: -0.1, fx: 0.9, credit: -0.2 },
+  'Automobile and Auto Components': { rate: -1.1, fx: -0.3, credit: -0.6 },
+  'Metals & Mining': { rate: -0.4, fx: 0.3, credit: -0.5 },
+  'Oil Gas & Consumable Fuels': { rate: -0.2, fx: -0.4, credit: -0.3 },
+  'Fast Moving Consumer Goods': { rate: -0.2, fx: -0.1, credit: -0.1 },
+  'Healthcare': { rate: -0.1, fx: 0.5, credit: -0.2 },
+  'Capital Goods': { rate: -0.7, fx: -0.2, credit: -0.5 },
+  'Construction Materials': { rate: -0.6, fx: -0.1, credit: -0.4 },
+  'Power': { rate: -0.8, fx: -0.1, credit: -0.6 },
+  'Telecommunication': { rate: -0.5, fx: -0.2, credit: -0.7 },
+  'Services': { rate: -0.4, fx: 0.1, credit: -0.4 },
+  'Consumer Durables': { rate: -0.4, fx: -0.2, credit: -0.3 },
+};
+function sectorSens(sector) { return SECTOR_SENSITIVITY[sector] || { rate: -0.4, fx: 0, credit: -0.4 }; }
+
+function computeBetaM6(stockCloses, benchReturns) {
+  const stockReturns = dailyReturnsFromCloses(stockCloses);
+  const n = Math.min(stockReturns.length, benchReturns.length);
+  const s = stockReturns.slice(-n), b = benchReturns.slice(-n);
+  const ms = mean(s), mb = mean(b);
+  let cov = 0, varB = 0;
+  for (let i = 0; i < n; i++) { cov += (s[i] - ms) * (b[i] - mb); varB += (b[i] - mb) ** 2; }
+  return cov / (varB || 1e-9);
+}
+
+function positionSensitivities() {
+  const positions = equityPositions();
+  const bench = benchmarkReturnSeries();
+  return positions.map((p) => {
+    const beta = computeBetaM6(p.closes, bench);
+    const sens = sectorSens(p.sector);
+    return { ...p, beta: round2(beta), rateSens: sens.rate, fxSens: sens.fx, creditSens: sens.credit };
+  });
+}
+
+function revalue(position, shocks) {
+  // ΔP/P ≈ beta·equityShock + rateSens·rateShock + fxSens·fxShock + creditSens·creditShock.
+  // Rate/credit shocks are already expressed in decimal fractions (e.g. 0.02 = 200bps), scaled
+  // consistently with the sector sensitivities above (fractional price impact per unit shock).
+  const contrib = {
+    equity: position.beta * shocks.equity,
+    rate: position.rateSens * shocks.rate * 10, // scale so 200bps * -0.9 sensitivity ~ realistic single-digit % impact
+    fx: position.fxSens * shocks.fx,
+    credit: position.creditSens * shocks.credit * 10,
+  };
+  const total = Object.values(contrib).reduce((a, b) => a + b, 0);
+  return { total, contrib };
+}
+
+function scenarioPnl(positions, scenario) {
+  let portPct = 0;
+  const driverTotals = { equity: 0, rate: 0, fx: 0, credit: 0 };
+  const perPosition = positions.map((p) => {
+    const { total, contrib } = revalue(p, scenario.shocks);
+    portPct += p.weight * total;
+    FACTORS.forEach((f) => { driverTotals[f] += p.weight * contrib[f]; });
+    return { id: p.id, name: p.name, sector: p.sector, weightPct: round2(p.weight * 100), pnlPct: round2(total * 100), pnlAmount: round2(total * p.marketValue) };
+  }).sort((a, b) => a.pnlPct - b.pnlPct);
+  const portValue = positions.reduce((a, p) => a + p.marketValue, 0);
+  return {
+    id: scenario.id, name: scenario.name, type: scenario.type, bias: scenario.bias,
+    portfolioPnlPct: round2(portPct * 100), portfolioPnlAmount: round2(portPct * portValue),
+    driverBreakdown: FACTORS.map((f) => ({ factor: f, pnlPct: round2(driverTotals[f] * 100) })),
+    worstPositions: perPosition.slice(0, 5), bestPositions: perPosition.slice(-3).reverse(),
+  };
+}
+
+// Reverse stress: closed-form minimal-Mahalanobis-norm shock x (under the assumed macro
+// covariance Sigma) such that the portfolio's linear sensitivity vector a satisfies aᵀx = target.
+// Lagrangian solution: x* = target · Sigma·a / (aᵀ·Sigma·a).
+function reverseStress(positions, targetLossPct) {
+  const portValue = positions.reduce((a, p) => a + p.marketValue, 0);
+  const a = FACTORS.map((f) => positions.reduce((s, p) => {
+    if (f === 'equity') return s + p.weight * p.beta;
+    if (f === 'rate') return s + p.weight * p.rateSens * 10;
+    if (f === 'fx') return s + p.weight * p.fxSens;
+    return s + p.weight * p.creditSens * 10;
+  }, 0));
+  const Sigma = macroCovariance();
+  const Sa = matVec(Sigma, a);
+  const aSa = a.reduce((s, ai, i) => s + ai * Sa[i], 0) || 1e-9;
+  const target = -targetLossPct; // negative = a loss
+  const scale = target / aSa;
+  const xStar = Sa.map((v) => v * scale);
+  const mahalanobisNorm = Math.sqrt(Math.max(a.reduce((s, ai, i) => s + xStar[i] * (matVec(Sigma, xStar)[i]), 0), 0));
+  return {
+    targetLossPct: round2(targetLossPct * 100),
+    shockSet: FACTORS.map((f, i) => ({ factor: f, shock: round2(xStar[i] * 100) })),
+    mahalanobisNorm: round2(mahalanobisNorm),
+    interpretation: `The smallest (most-plausible, correlation-weighted) combination of equity/rate/FX/credit shocks that would produce a ${round2(targetLossPct * 100)}% portfolio loss.`,
+  };
+}
+
+function runStressTesting(payload) {
+  const p = payload || {};
+  const reverseStressThresholdPct = p.reverseStressThresholdPct != null ? p.reverseStressThresholdPct : 0.15;
+
+  const positions = positionSensitivities();
+  const scenarioResults = SCENARIO_LIBRARY.map((sc) => scenarioPnl(positions, sc));
+  const worstScenarios = [...scenarioResults].sort((a, b) => a.portfolioPnlPct - b.portfolioPnlPct);
+
+  const regime = runRegimeDetection({}).currentRegime;
+  const bearishRegime = regime.regime.startsWith('Bear');
+  const plausibilityWeights = scenarioResults.map((sc) => {
+    let weight = 0.5, note;
+    if (sc.bias === 'bearish') {
+      weight = bearishRegime ? 0.75 : 0.35;
+      note = bearishRegime ? 'Current regime is bearish, raising the plausibility of further bearish shocks.' : 'Current regime is not bearish; this bearish scenario is weighted as tail risk rather than base case.';
+    } else {
+      weight = 0.5;
+      note = 'A neutral-bias scenario keeps a moderate plausibility weight regardless of the current regime.';
+    }
+    return { id: sc.id, name: sc.name, plausibilityWeight: round2(weight), note };
+  });
+
+  const reverse = reverseStress(positions, reverseStressThresholdPct);
+
+  return {
+    scenarioResults,
+    worstScenarios: worstScenarios.slice(0, 3),
+    reverseStress: reverse,
+    driverAttribution: scenarioResults.map((s) => ({ id: s.id, name: s.name, driverBreakdown: s.driverBreakdown })),
+    plausibilityWeights: { currentRegime: regime.regime, weights: plausibilityWeights },
+    positionCount: positions.length,
+    modelNote: 'Sector rate/FX/credit sensitivities are illustrative assumptions standing in for a licensed multi-factor macro-sensitivity feed; equity beta is a genuine regression against the universe benchmark. Shock magnitudes are sized to the broad order of the named historical episode, not fitted to realised factor moves over that exact window.',
+  };
+}
+
+
+
+// M6-UC4 — Volatility Forecasting (GARCH + ML). Fits GARCH(1,1), GJR-GARCH (asymmetric) and
+// EGARCH to the portfolio's daily return history via grid-searched quasi-maximum-likelihood (a
+// genuine, if coarse-grid, MLE rather than a canned parameter set); fits a HAR-RV model by OLS on
+// realised-vol features; blends all four by inverse out-of-sample QLIKE loss on a held-out slice,
+// benchmarked against a random-walk baseline, with a synthetic implied-vol anchor (no licensed
+// India VIX feed) blended in for short horizons.
+
+// ---- GARCH-family conditional-variance recursions ----
+function garchSigma2(eps, omega, alpha, beta) {
+  const n = eps.length;
+  const sigma2 = new Array(n);
+  sigma2[0] = mean(eps.map((e) => e * e));
+  for (let t = 1; t < n; t++) sigma2[t] = omega + alpha * eps[t - 1] ** 2 + beta * sigma2[t - 1];
+  return sigma2;
+}
+function gjrSigma2(eps, omega, alpha, gamma, beta) {
+  const n = eps.length;
+  const sigma2 = new Array(n);
+  sigma2[0] = mean(eps.map((e) => e * e));
+  for (let t = 1; t < n; t++) {
+    const asym = eps[t - 1] < 0 ? gamma * eps[t - 1] ** 2 : 0;
+    sigma2[t] = omega + alpha * eps[t - 1] ** 2 + asym + beta * sigma2[t - 1];
+  }
+  return sigma2;
+}
+function egarchLogSigma2(eps, omega, alpha, gamma, beta) {
+  const n = eps.length;
+  const uncondVar = mean(eps.map((e) => e * e));
+  const logSigma2 = new Array(n);
+  logSigma2[0] = Math.log(uncondVar);
+  const sigma = [Math.sqrt(uncondVar)];
+  const expAbsZ = Math.sqrt(2 / Math.PI); // E|z| for standard normal z
+  for (let t = 1; t < n; t++) {
+    const sPrev = Math.sqrt(Math.exp(logSigma2[t - 1]));
+    const z = eps[t - 1] / (sPrev || 1e-9);
+    logSigma2[t] = omega + beta * logSigma2[t - 1] + alpha * (Math.abs(z) - expAbsZ) + gamma * z;
+  }
+  return logSigma2.map((l) => Math.exp(l));
+}
+
+function quasiLogLik(eps, sigma2) {
+  let ll = 0;
+  for (let t = 0; t < eps.length; t++) {
+    const s2 = Math.max(sigma2[t], 1e-10);
+    ll += -0.5 * (Math.log(2 * Math.PI) + Math.log(s2) + (eps[t] ** 2) / s2);
+  }
+  return ll;
+}
+
+// Coarse-grid quasi-MLE: small, dependency-free stand-in for a numerical optimiser. Adequate for
+// a single-asset/portfolio series and keeps the whole prototype running on pure JS.
+function fitGarch(eps) {
+  const uncondVar = mean(eps.map((e) => e * e));
+  let best = null;
+  for (const alpha of [0.03, 0.05, 0.07, 0.10, 0.13]) {
+    for (const beta of [0.75, 0.80, 0.85, 0.88, 0.90, 0.93]) {
+      if (alpha + beta >= 0.999) continue;
+      const omega = uncondVar * (1 - alpha - beta);
+      const sigma2 = garchSigma2(eps, omega, alpha, beta);
+      const ll = quasiLogLik(eps, sigma2);
+      if (!best || ll > best.ll) best = { omega, alpha, beta, ll, sigma2 };
+    }
+  }
+  return { model: 'GARCH(1,1)', ...best, persistence: round2(best.alpha + best.beta) };
+}
+function fitGjr(eps) {
+  const uncondVar = mean(eps.map((e) => e * e));
+  let best = null;
+  for (const alpha of [0.02, 0.04, 0.06]) {
+    for (const gamma of [0.05, 0.10, 0.15, 0.20]) {
+      for (const beta of [0.75, 0.82, 0.88, 0.92]) {
+        if (alpha + gamma / 2 + beta >= 0.999) continue;
+        const omega = uncondVar * (1 - alpha - gamma / 2 - beta);
+        if (omega <= 0) continue;
+        const sigma2 = gjrSigma2(eps, omega, alpha, gamma, beta);
+        const ll = quasiLogLik(eps, sigma2);
+        if (!best || ll > best.ll) best = { omega, alpha, gamma, beta, ll, sigma2 };
+      }
+    }
+  }
+  return { model: 'GJR-GARCH', ...best, persistence: round2(best.alpha + best.gamma / 2 + best.beta) };
+}
+function fitEgarch(eps) {
+  const uncondVar = mean(eps.map((e) => e * e));
+  const logUncondVar = Math.log(uncondVar);
+  let best = null;
+  for (const alpha of [0.08, 0.12, 0.16]) {
+    for (const gamma of [-0.12, -0.06, 0, 0.06]) {
+      for (const beta of [0.90, 0.94, 0.97]) {
+        // Variance targeting in log-space: the process is mean-reverting to log(uncondVar) since
+        // E[alpha*(|z|-E|z|) + gamma*z] = 0 for iid standard-normal innovations z, so
+        // omega = (1-beta)*log(uncondVar) pins the unconditional level to the sample variance.
+        const omega = (1 - beta) * logUncondVar;
+        const sigma2 = egarchLogSigma2(eps, omega, alpha, gamma, beta);
+        const ll = quasiLogLik(eps, sigma2);
+        if (!best || ll > best.ll) best = { omega, alpha, gamma, beta, ll, sigma2 };
+      }
+    }
+  }
+  return { model: 'EGARCH', ...best, persistence: round2(best.beta) };
+}
+
+// ---- HAR-RV (Corsi 2009) on daily-squared-return realised-vol proxy ----
+function harRv(eps) {
+  const rv = eps.map((e) => e * e); // daily realised-variance proxy (no intraday data available)
+  const n = rv.length;
+  const rows = [], y = [];
+  for (let t = 22; t < n - 1; t++) {
+    const rvD = rv[t];
+    const rvW = mean(rv.slice(t - 4, t + 1));
+    const rvM = mean(rv.slice(t - 21, t + 1));
+    rows.push([1, rvD, rvW, rvM]);
+    y.push(rv[t + 1]);
+  }
+  const X = rows, Xt = transpose(X);
+  const XtX = matMul(Xt, X);
+  const XtXinv = invert(XtX);
+  const Xty = matVec(Xt, y);
+  const coeffs = matVec(XtXinv, Xty); // [c, betaD, betaW, betaM]
+  const fitted = X.map((row) => row.reduce((s, x, i) => s + x * coeffs[i], 0));
+  return { coeffs: { c: coeffs[0], betaD: coeffs[1], betaW: coeffs[2], betaM: coeffs[3] }, rv, fitted, startIdx: 22 };
+}
+function harForecastNext(coeffs, rv, atIdx) {
+  const rvD = rv[atIdx];
+  const rvW = mean(rv.slice(Math.max(0, atIdx - 4), atIdx + 1));
+  const rvM = mean(rv.slice(Math.max(0, atIdx - 21), atIdx + 1));
+  return Math.max(coeffs.c + coeffs.betaD * rvD + coeffs.betaW * rvW + coeffs.betaM * rvM, 1e-10);
+}
+
+// Synthetic implied-vol proxy: no licensed India VIX feed, so this derives a forward-looking gauge
+// from the cross-sectional dispersion of the universe's own trailing 20-day realised vol (wider
+// cross-sectional dispersion in realised vol historically leads a rise in the market's implied
+// vol) -- an honest synthetic stand-in, documented as such rather than presented as real VIX data.
+function syntheticImpliedVol(eps) {
+  const n = eps.length;
+  const trailing = eps.slice(Math.max(0, n - 20));
+  const realizedVol20d = std(trailing) * Math.sqrt(252);
+  const impliedVol = realizedVol20d * 1.15; // implied typically trades at a premium to trailing realised (variance risk premium)
+  return { impliedVolAnnualPct: round2(impliedVol * 100), realizedVol20dAnnualPct: round2(realizedVol20d * 100), premiumPct: round2((impliedVol / realizedVol20d - 1) * 100) };
+}
+
+function qlikeLoss(sigma2Series, epsSeries) {
+  let s = 0;
+  for (let i = 0; i < sigma2Series.length; i++) {
+    const s2 = Math.max(sigma2Series[i], 1e-10);
+    s += Math.log(s2) + (epsSeries[i] ** 2) / s2;
+  }
+  return s / sigma2Series.length;
+}
+
+function multiHorizonForecast(fit, kind, eps, horizonsDays, simPaths, seed) {
+  const rng = makeRng(seed);
+  const n = eps.length;
+  const lastSigma2 = fit.sigma2[n - 1];
+  const lastEps = eps[n - 1];
+  const residuals = eps.map((e, i) => e / Math.sqrt(Math.max(fit.sigma2[i], 1e-10))); // standardised residuals for bootstrap
+  const horizonResults = {};
+  horizonsDays.forEach((h) => {
+    const cumVars = [];
+    for (let path = 0; path < simPaths; path++) {
+      let s2 = lastSigma2, e = lastEps, cumVar = 0;
+      for (let step = 0; step < h; step++) {
+        const z = residuals[Math.floor(rng() * residuals.length)]; // filtered historical simulation (bootstrapped residual)
+        let nextS2;
+        if (kind === 'garch') nextS2 = fit.omega + fit.alpha * e * e + fit.beta * s2;
+        else if (kind === 'gjr') nextS2 = fit.omega + fit.alpha * e * e + (e < 0 ? fit.gamma * e * e : 0) + fit.beta * s2;
+        else { const logS2 = Math.log(Math.max(s2, 1e-10)); nextS2 = Math.exp(fit.omega + fit.beta * logS2 + fit.alpha * (Math.abs(z) - Math.sqrt(2 / Math.PI)) + fit.gamma * z); }
+        e = z * Math.sqrt(Math.max(nextS2, 1e-10));
+        cumVar += nextS2;
+        s2 = nextS2;
+      }
+      cumVars.push(cumVar);
+    }
+    cumVars.sort((a, b) => a - b);
+    const pct = (p) => cumVars[Math.min(cumVars.length - 1, Math.floor(p * cumVars.length))];
+    const medianVar = pct(0.5);
+    horizonResults[h] = {
+      volAnnualPct: round2(Math.sqrt((medianVar / h) * 252) * 100),
+      bandLowAnnualPct: round2(Math.sqrt((pct(0.10) / h) * 252) * 100),
+      bandHighAnnualPct: round2(Math.sqrt((pct(0.90) / h) * 252) * 100),
+    };
+  });
+  return horizonResults;
+}
+
+function runVolatilityForecast(payload) {
+  const p = payload || {};
+  const horizonsDays = p.horizonsDays || [1, 5, 21];
+  const simPaths = p.simPaths || 800;
+  const impliedAnchorWeight = p.impliedAnchorWeight != null ? p.impliedAnchorWeight : 0.25;
+
+  const core = riskCoreForPortfolio(0.2);
+  const eps = core.portReturns.map((r) => r - mean(core.portReturns)); // demeaned returns as GARCH innovations
+
+  const splitIdx = Math.floor(eps.length * 0.7);
+  const trainEps = eps.slice(0, splitIdx), testEps = eps.slice(splitIdx);
+
+  const garchFit = fitGarch(trainEps);
+  const gjrFit = fitGjr(trainEps);
+  const egarchFit = fitEgarch(trainEps);
+  const harFit = harRv(trainEps);
+
+  // Refit each model's sigma2 recursion across the FULL sample (using the train-fitted params) so
+  // both in-sample and out-of-sample diagnostics and the horizon forecasts start from the latest
+  // observation.
+  const garchFull = { ...garchFit, sigma2: garchSigma2(eps, garchFit.omega, garchFit.alpha, garchFit.beta) };
+  const gjrFull = { ...gjrFit, sigma2: gjrSigma2(eps, gjrFit.omega, gjrFit.alpha, gjrFit.gamma, gjrFit.beta) };
+  const egarchFull = { ...egarchFit, sigma2: egarchLogSigma2(eps, egarchFit.omega, egarchFit.alpha, egarchFit.gamma, egarchFit.beta) };
+
+  // Out-of-sample QLIKE on the test slice for each model, plus a random-walk baseline (yesterday's
+  // squared return as today's variance forecast) per the spec's acceptance criterion.
+  const testSigma2 = { garch: garchFull.sigma2.slice(splitIdx), gjr: gjrFull.sigma2.slice(splitIdx), egarch: egarchFull.sigma2.slice(splitIdx) };
+  const rwSigma2Test = eps.slice(splitIdx - 1, eps.length - 1).map((e) => e * e);
+  const qlike = {
+    garch: round2(qlikeLoss(testSigma2.garch, testEps)), gjr: round2(qlikeLoss(testSigma2.gjr, testEps)),
+    egarch: round2(qlikeLoss(testSigma2.egarch, testEps)), randomWalk: round2(qlikeLoss(rwSigma2Test, testEps)),
+  };
+  const harTestFitted = harFit.fitted.slice(Math.max(0, splitIdx - harFit.startIdx));
+  const harTestActual = eps.slice(Math.max(harFit.startIdx, splitIdx) + 1).map((e) => e * e).slice(0, harTestFitted.length);
+  qlike.harRv = harTestFitted.length ? round2(qlikeLoss(harTestFitted.slice(0, harTestActual.length), harTestActual.map((v) => Math.sqrt(v)))) : qlike.garch;
+
+  // Ensemble weights inversely proportional to out-of-sample QLIKE (lower loss = more weight).
+  const models = ['garch', 'gjr', 'egarch', 'harRv'];
+  const invLoss = models.map((m) => 1 / Math.max(qlike[m], 1e-6));
+  const invLossSum = invLoss.reduce((a, b) => a + b, 0);
+  const ensembleWeights = models.reduce((acc, m, i) => { acc[m] = round2(invLoss[i] / invLossSum); return acc; }, {});
+
+  const forecastsByModel = {
+    garch: multiHorizonForecast(garchFull, 'garch', eps, horizonsDays, simPaths, 11),
+    gjr: multiHorizonForecast(gjrFull, 'gjr', eps, horizonsDays, simPaths, 22),
+    egarch: multiHorizonForecast(egarchFull, 'egarch', eps, horizonsDays, simPaths, 33),
+  };
+  const harNextVar = harForecastNext(harFit.coeffs, eps.map((e) => e * e), eps.length - 1);
+  const harVolAnnualPct = round2(Math.sqrt(harNextVar * 252) * 100);
+
+  const implied = syntheticImpliedVol(eps);
+
+  const blendedByHorizon = horizonsDays.map((h) => {
+    const garchVol = forecastsByModel.garch[h].volAnnualPct, gjrVol = forecastsByModel.gjr[h].volAnnualPct, egarchVol = forecastsByModel.egarch[h].volAnnualPct;
+    const modelBlend = garchVol * ensembleWeights.garch + gjrVol * ensembleWeights.gjr + egarchVol * ensembleWeights.egarch + harVolAnnualPct * ensembleWeights.harRv;
+    // Implied-vol anchor blended in more heavily at short horizons (spec's FR-VF-03), decaying at longer horizons.
+    const anchorWeightAtH = impliedAnchorWeight * Math.max(0, 1 - (h - 1) / 21);
+    const blended = modelBlend * (1 - anchorWeightAtH) + implied.impliedVolAnnualPct * anchorWeightAtH;
+    return {
+      horizonDays: h, modelBlendPct: round2(modelBlend), blendedWithImpliedPct: round2(blended),
+      bandLowPct: round2(Math.min(forecastsByModel.garch[h].bandLowAnnualPct, forecastsByModel.gjr[h].bandLowAnnualPct, forecastsByModel.egarch[h].bandLowAnnualPct)),
+      bandHighPct: round2(Math.max(forecastsByModel.garch[h].bandHighAnnualPct, forecastsByModel.gjr[h].bandHighAnnualPct, forecastsByModel.egarch[h].bandHighAnnualPct)),
+    };
+  });
+
+  const ensembleQlike = round2(models.reduce((a, m) => a + ensembleWeights[m] * qlike[m], 0));
+  const bestSingleQlike = round2(Math.min(qlike.garch, qlike.gjr, qlike.egarch, qlike.harRv));
+
+  return {
+    volForecast: { garch: { params: { omega: round2(garchFull.omega), alpha: round2(garchFull.alpha), beta: round2(garchFull.beta) }, persistence: garchFull.persistence, byHorizon: forecastsByModel.garch }, gjr: { params: { omega: round2(gjrFull.omega), alpha: round2(gjrFull.alpha), gamma: round2(gjrFull.gamma), beta: round2(gjrFull.beta) }, persistence: gjrFull.persistence, byHorizon: forecastsByModel.gjr }, egarch: { params: { omega: round2(egarchFull.omega), alpha: round2(egarchFull.alpha), gamma: round2(egarchFull.gamma), beta: round2(egarchFull.beta) }, persistence: egarchFull.persistence, byHorizon: forecastsByModel.egarch }, harRv: { coeffs: { betaD: round2(harFit.coeffs.betaD), betaW: round2(harFit.coeffs.betaW), betaM: round2(harFit.coeffs.betaM) }, nextDayVolAnnualPct: harVolAnnualPct } },
+    blendedVol: { byHorizon: blendedByHorizon, ensembleWeights },
+    impliedVsRealized: implied,
+    modelDiagnostics: { outOfSampleQlike: qlike, ensembleQlike, bestSingleModelQlike: bestSingleQlike, ensembleBeatsRandomWalk: ensembleQlike < qlike.randomWalk, ensembleBeatsBestSingle: ensembleQlike <= bestSingleQlike, note: 'QLIKE (quasi-likelihood loss) evaluated out-of-sample on the trailing 30% of the return history, per the spec’s "proper vol-forecast loss, not just MSE" requirement.' },
+  };
+}
+
+
+
+// M6-UC5 — Drawdown Prediction & Hedging. Simulates forward portfolio-value paths via filtered
+// historical simulation (bootstrapped historical daily returns) to build a genuine max-drawdown
+// distribution and threshold-breach probability; combines volatility (M6-UC4), regime (M5-UC10),
+// market breadth and momentum into an early-warning score; sizes protective-put, index-futures and
+// low-beta-rotation hedges against a risk target with real Black-Scholes option pricing, reporting
+// cost, residual risk and effectiveness; proposes rule-based dynamic re-hedge triggers.
+
+function maxDrawdown(returnsPath) {
+  let peak = 1, value = 1, mdd = 0;
+  for (const r of returnsPath) {
+    value *= (1 + r);
+    if (value > peak) peak = value;
+    const dd = (value - peak) / peak;
+    if (dd < mdd) mdd = dd;
+  }
+  return mdd;
+}
+
+function simulateDrawdownDistribution(historicalReturns, horizonDays, paths, seed) {
+  const rng = makeRng(seed);
+  const n = historicalReturns.length;
+  const mdds = [];
+  for (let p = 0; p < paths; p++) {
+    const path = [];
+    for (let d = 0; d < horizonDays; d++) path.push(historicalReturns[Math.floor(rng() * n)]);
+    mdds.push(maxDrawdown(path));
+  }
+  mdds.sort((a, b) => a - b); // most negative first
+  return mdds;
+}
+
+function breadthScore() {
+  // % of the universe trading above its own 50-day moving average -- a genuine breadth measure
+  // computed fresh here (kept independent of m3Act1Market.js's breadth calc to avoid a static-
+  // bundle name collision, per the established Module 5 convention).
+  let above = 0;
+  STOCK_UNIVERSE.forEach((s) => {
+    const closes = s.ohlcv.map((b) => b.close);
+    const window = closes.slice(-50);
+    const sma50 = mean(window);
+    if (closes[closes.length - 1] > sma50) above++;
+  });
+  return round2((above / STOCK_UNIVERSE.length) * 100);
+}
+
+function blackScholesPut(S, K, T, r, sigma) {
+  const d1 = (Math.log(S / K) + (r + (sigma * sigma) / 2) * T) / (sigma * Math.sqrt(T));
+  const d2 = d1 - sigma * Math.sqrt(T);
+  const price = K * Math.exp(-r * T) * normCdf(-d2) - S * normCdf(-d1);
+  return { price: Math.max(price, 0), delta: normCdf(d1) - 1 };
+}
+
+function earlyWarningScore(portReturns, volForecastAnnualPct) {
+  const trailingVol60d = std(portReturns.slice(-60)) * Math.sqrt(252) * 100;
+  const volZ = (volForecastAnnualPct - trailingVol60d) / (trailingVol60d * 0.25 || 1); // forecast rising above its own recent trailing level
+  const regime = runRegimeDetection({}).currentRegime;
+  const regimeScore = { 'Bear-Volatile': 90, 'Bear-Quiet': 60, 'Bull-Volatile': 55, 'Bull-Quiet': 15 }[regime.regime] ?? 50;
+  const breadth = breadthScore();
+  const breadthScoreInv = 100 - breadth; // low breadth (few stocks above their 50dma) = warning
+  const momentum20d = (portReturns.slice(-20).reduce((a, r) => a + r, 0)) * 100; // cumulative 20d portfolio return
+  const momentumScoreInv = Math.max(0, Math.min(100, 50 - momentum20d * 8)); // negative momentum raises the score
+  const volScore = Math.max(0, Math.min(100, 50 + volZ * 30));
+  const composite = round2(0.35 * volScore + 0.30 * regimeScore + 0.20 * breadthScoreInv + 0.15 * momentumScoreInv);
+  return {
+    composite, level: composite > 70 ? 'Elevated' : composite > 45 ? 'Moderate' : 'Low',
+    drivers: { volForecastScore: round2(volScore), regimeScore, breadthScore: round2(breadthScoreInv), momentumScore: round2(momentumScoreInv) },
+    inputs: { trailingVol60dAnnualPct: round2(trailingVol60d), regime: regime.regime, universeBreadthAbove50dmaPct: breadth, portfolioReturn20dPct: round2(momentum20d) },
+  };
+}
+
+function runDrawdownHedging(payload) {
+  const p = payload || {};
+  const horizonDays = p.horizonDays || 60;
+  const mddThreshold = p.mddThresholdPct != null ? p.mddThresholdPct / 100 : -0.15;
+  const riskTargetPct = p.riskTargetVolPct != null ? p.riskTargetVolPct : 7;
+  const paths = p.simPaths || 4000;
+
+  const core = riskCoreForPortfolio(0.2);
+  const portValue = core.positions.reduce((a, pos) => a + pos.marketValue, 0);
+
+  const mdds = simulateDrawdownDistribution(core.portReturns, horizonDays, paths, 7);
+  const pct = (q) => mdds[Math.min(mdds.length - 1, Math.floor(q * mdds.length))];
+  const breachCount = mdds.filter((m) => m <= mddThreshold).length;
+  const drawdownRisk = {
+    horizonDays, medianMddPct: round2(pct(0.5) * 100), p10MddPct: round2(pct(0.10) * 100), p05MddPct: round2(pct(0.05) * 100), worstMddPct: round2(mdds[0] * 100),
+    thresholdPct: round2(mddThreshold * 100), breachProbabilityPct: round2((breachCount / paths) * 100),
+  };
+
+  const volOut = runVolatilityForecast({ horizonsDays: [horizonDays > 21 ? 21 : horizonDays] });
+  const volForecastAnnualPct = volOut.blendedVol.byHorizon[0].blendedWithImpliedPct;
+  const earlyWarning = earlyWarningScore(core.portReturns, volForecastAnnualPct);
+
+  const currentVolAnnualPct = round2(std(core.portReturns) * Math.sqrt(252) * 100);
+  const excessRiskPct = Math.max(0, currentVolAnnualPct - riskTargetPct);
+  const hedgeFraction = Math.min(1, excessRiskPct / (currentVolAnnualPct || 1));
+
+  // Protective put: an ATM index-proxy put (strike = current portfolio value, priced off the
+  // portfolio's own forecast vol) sized to hedge the excess-risk fraction of the book.
+  const T = horizonDays / 252, r = 0.068;
+  const putSigma = volForecastAnnualPct / 100;
+  const put = blackScholesPut(portValue, portValue, T, r, putSigma);
+  const putNotionalHedged = portValue * hedgeFraction;
+  const putCost = round2(put.price * hedgeFraction);
+  const putCostPctOfPortfolio = round2((putCost / portValue) * 100);
+
+  // Index-futures hedge: hedge ratio = beta * (portfolio value / contract value); beta of the
+  // book vs the universe benchmark computed the same way as M6-UC3.
+  const bench = benchmarkReturnSeries();
+  const n = Math.min(core.portReturns.length, bench.length);
+  const pr = core.portReturns.slice(-n), br = bench.slice(-n);
+  const mp = mean(pr), mb = mean(br);
+  let cov = 0, varB = 0;
+  for (let i = 0; i < n; i++) { cov += (pr[i] - mp) * (br[i] - mb); varB += (br[i] - mb) ** 2; }
+  const portfolioBeta = cov / (varB || 1e-9);
+  const contractValue = 750000; // illustrative index-futures contract notional
+  const futuresContracts = round2((portfolioBeta * portValue * hedgeFraction) / contractValue);
+  const futuresRollCostPctPerAnnum = 0.9; // illustrative basis/roll cost, bps-of-notional per year
+  const futuresCost = round2(Math.abs(futuresContracts) * contractValue * (futuresRollCostPctPerAnnum / 100) * T);
+
+  // Low-beta rotation: shift weight from the highest-beta names into the lowest-beta names within
+  // the book, sized to the same excess-risk fraction, at zero direct cash cost (transaction costs
+  // aside) but with a tracking-error/opportunity cost.
+  const positions = equityPositions();
+  const betaByPos = positions.map((pos) => {
+    const closes = pos.closes, rets = [];
+    for (let i = 1; i < closes.length; i++) rets.push(closes[i] / closes[i - 1] - 1);
+    const rr = rets.slice(-n);
+    const mr = mean(rr);
+    let c = 0, v = 0;
+    for (let i = 0; i < n; i++) { c += (rr[i] - mr) * (br[i] - mb); v += (br[i] - mb) ** 2; }
+    return { id: pos.id, name: pos.name, beta: round2(c / (v || 1e-9)), weight: pos.weight };
+  }).sort((a, b) => b.beta - a.beta);
+  const rotationSize = round2(hedgeFraction * portValue * 0.5);
+  const rotationCostPct = 0.35; // illustrative tracking-error/opportunity-cost proxy, % of rotated notional
+
+  const hedgeRecommendations = [
+    { instrument: 'Protective Put (index-proxy, ATM)', notionalHedged: round2(putNotionalHedged), cost: putCost, costPctOfPortfolio: putCostPctOfPortfolio, detail: `Strike ≈ current portfolio value, ${horizonDays}-day tenor, priced off the ${round2(putSigma * 100)}% forecast vol.` },
+    { instrument: 'Index Futures (short)', contracts: futuresContracts, notionalHedged: round2(Math.abs(futuresContracts) * contractValue), cost: futuresCost, costPctOfPortfolio: round2((futuresCost / portValue) * 100), detail: `Hedge ratio = beta (${round2(portfolioBeta)}) × portfolio value / contract value; roll/basis cost only, no premium.` },
+    { instrument: 'Low-Beta Rotation', notionalRotated: rotationSize, cost: round2(rotationSize * (rotationCostPct / 100)), costPctOfPortfolio: round2((rotationSize * (rotationCostPct / 100) / portValue) * 100), detail: `Trim ${betaByPos.slice(0, 3).map((b) => b.id).join(', ')} (highest beta) into ${betaByPos.slice(-3).map((b) => b.id).join(', ')} (lowest beta), no derivatives required.` },
+  ];
+
+  const residualVolAnnualPct = round2(currentVolAnnualPct * (1 - hedgeFraction * 0.85)); // hedges are imperfect; 0.85 effectiveness factor is a documented assumption
+  const effectiveness = round2(1 - residualVolAnnualPct / (currentVolAnnualPct || 1));
+
+  const rehedgePlan = {
+    triggers: [
+      { condition: 'Realised 20-day vol exceeds the current forecast by >25%', action: 'Increase hedge fraction toward full excess-risk coverage.' },
+      { condition: `Regime flips to Bear-Volatile (currently ${earlyWarning.inputs.regime})`, action: 'Add protective-put notional; prioritise puts over futures for convexity in a fast sell-off.' },
+      { condition: 'Early-warning score falls back below 45 (Low)', action: 'Unwind hedges to reduce cost drag once conditions normalise.' },
+    ],
+    reviewFrequency: 'Weekly, or immediately on a regime-flip signal from Module 5.',
+  };
+
+  return {
+    drawdownRisk, earlyWarning, hedgeRecommendations,
+    residualRisk: { unhedgedVolAnnualPct: currentVolAnnualPct, residualVolAnnualPct, effectiveness, riskTargetPct, hedgeFractionApplied: round2(hedgeFraction * 100) },
+    rehedgePlan,
+    portfolioValue: round2(portValue), portfolioBeta: round2(portfolioBeta),
+    modelNote: 'Drawdown distribution comes from a genuine bootstrapped (filtered-historical-simulation) Monte Carlo over the actual return history, not an assumed distribution. Hedge costs use documented illustrative assumptions for contract size and roll cost absent a licensed derivatives-pricing feed; the put premium itself is real Black-Scholes.',
+  };
+}
+
+
+
+// M6-UC6 — Liquidity & Concentration Risk. Days-to-liquidate and square-root market-impact cost
+// for the real 21-stock equity sleeve (from genuine ADV computed off actual historical volume);
+// concentration (HHI, top-N, sector, issuer) across the FULL real book (stocks + mutual funds,
+// since concentration risk spans the whole portfolio even though exchange liquidity mechanics
+// don't apply to fund redemptions); limit monitoring against governed thresholds; an impact-
+// minimising liquidation schedule; liquidity-adjusted VaR (reusing M6-UC1's parametric VaR); and a
+// reduced-volume liquidity stress test.
+
+// Illustrative bid-ask spread by market-cap bucket -- no licensed market-depth feed (per the
+// spec's own "N/A -> exchange market-depth data" note), so this is a documented assumption.
+const SPREAD_BPS_BY_MACAP = { Large: 5, Mid: 15, Small: 30 };
+
+function liquidityForPosition(stock, marketValue, maxParticipation) {
+  const vols = stock.ohlcv.slice(-20).map((b) => b.volume);
+  const adv = vols.reduce((a, b) => a + b, 0) / vols.length;
+  const price = stock.currentPrice;
+  const shares = marketValue / price;
+  const participation = maxParticipation;
+  const daysToLiquidate = shares / (participation * adv || 1);
+  const spreadBps = SPREAD_BPS_BY_MACAP[stock.macap] || 15;
+  // Square-root market-impact law: impact (bps) ≈ k * sigma * sqrt(participation), a standard
+  // practitioner approximation; sigma proxied by the position's own trailing annualised vol.
+  const closes = stock.ohlcv.map((b) => b.close);
+  const rets = []; for (let i = 1; i < closes.length; i++) rets.push(closes[i] / closes[i - 1] - 1);
+  const dailyVol = Math.sqrt(rets.reduce((a, r) => a + r * r, 0) / rets.length);
+  const impactBps = 100 * 0.8 * dailyVol * Math.sqrt(participation) * 10000 / 100; // k=0.8, scaled to bps
+  const totalCostBps = spreadBps / 2 + impactBps;
+  // At retail-scale position sizes traded against institutional ADV, days-to-liquidate is often a
+  // small fraction of one trading day -- report minutes too (375 = 6.25hr session in minutes) so
+  // 2-decimal rounding doesn't wash out a genuinely-tiny-but-real number down to "0.00".
+  return {
+    daysToLiquidate: round2(daysToLiquidate), minutesToLiquidate: round2(daysToLiquidate * 375),
+    adv: Math.round(adv), spreadBps, impactBps: round2(impactBps), totalCostBps: round2(totalCostBps), impactCostAmount: round2(marketValue * (totalCostBps / 10000)),
+  };
+}
+
+function hhiAndTopN(items, weightKey, groupKey) {
+  const groups = {};
+  items.forEach((it) => { const g = it[groupKey] || it.id; groups[g] = (groups[g] || 0) + it[weightKey]; });
+  const weights = Object.values(groups);
+  const hhi = round2(weights.reduce((a, w) => a + w * w, 0) * 10000); // HHI on a 0-10000 scale (weights as fractions)
+  const sortedGroups = Object.entries(groups).sort((a, b) => b[1] - a[1]);
+  return { hhi, groups: sortedGroups.map(([name, w]) => ({ name, weightPct: round2(w * 100) })) };
+}
+
+function runLiquidityConcentration(payload) {
+  const p = payload || {};
+  const maxParticipation = p.maxParticipationRate || 0.15;
+  const stressVolumeHaircut = p.stressVolumeHaircut != null ? p.stressVolumeHaircut : 0.5;
+  const limits = p.limits || { singleNamePct: 10, sectorPct: 25, issuerPct: 15 };
+  const liquidationHorizonDays = p.liquidationHorizonDays || 5;
+
+  const positions = equityPositions();
+
+  // Liquidity needs raw volume, which equityPositions() doesn't carry (it only exposes closes) --
+  // look positions up in the full STOCK_UNIVERSE record for volume history.
+  const stockById = {}; STOCK_UNIVERSE.forEach((s) => { stockById[s.id] = s; });
+  const liqTable = positions.map((pos) => {
+    const stock = stockById[pos.id];
+    const liq = liquidityForPosition(stock, pos.marketValue, maxParticipation);
+    return { id: pos.id, name: pos.name, sector: pos.sector, weightPct: round2(pos.weight * 100), marketValue: pos.marketValue, ...liq };
+  }).sort((a, b) => b.daysToLiquidate - a.daysToLiquidate);
+
+  // Stress: reduced-volume (crisis liquidity) conditions -- ADV haircut lengthens time-to-exit and
+  // raises impact cost for the same participation rate.
+  const liqTableStressed = positions.map((pos) => {
+    const stock = stockById[pos.id];
+    const stockStressed = { ...stock, ohlcv: stock.ohlcv.map((b) => ({ ...b, volume: b.volume * (1 - stressVolumeHaircut) })) };
+    const liq = liquidityForPosition(stockStressed, pos.marketValue, maxParticipation);
+    return { id: pos.id, daysToLiquidate: liq.daysToLiquidate, totalCostBps: liq.totalCostBps };
+  });
+  const avgDaysBase = round2(liqTable.reduce((a, r) => a + r.daysToLiquidate, 0) / liqTable.length);
+  const avgDaysStressed = round2(liqTableStressed.reduce((a, r) => a + r.daysToLiquidate, 0) / liqTableStressed.length);
+  // Days-to-liquidate is linear in 1/ADV, so the stress multiplier follows directly and
+  // deterministically from the haircut (1/(1-haircut)) -- avoids a noisy/near-zero empirical
+  // ratio when position sizes are trivial relative to ADV (as here: a retail-scale book against
+  // institutional daily volumes).
+  const daysIncreaseFactorExact = round2(1 / (1 - stressVolumeHaircut));
+
+  // Concentration across the FULL book (equity + mutual funds).
+  const allHoldings = REAL_HOLDINGS.map((h) => ({ id: h.id, name: h.name, sector: h.sector, marketValue: h.qty * h.currentPrice, issuer: h.name.split(' ')[0] }));
+  const totalMv = allHoldings.reduce((a, h) => a + h.marketValue, 0);
+  const weighted = allHoldings.map((h) => ({ ...h, weight: h.marketValue / totalMv }));
+
+  const byName = hhiAndTopN(weighted, 'weight', 'id');
+  const bySector = hhiAndTopN(weighted, 'weight', 'sector');
+  const top5NamePct = round2(byName.groups.slice(0, 5).reduce((a, g) => a + g.weightPct, 0));
+  const top3SectorPct = round2(bySector.groups.slice(0, 3).reduce((a, g) => a + g.weightPct, 0));
+
+  const limitBreaches = [];
+  byName.groups.forEach((g) => { if (g.weightPct > limits.singleNamePct) limitBreaches.push({ type: 'Single-Name', name: g.name, weightPct: g.weightPct, limitPct: limits.singleNamePct, breachPct: round2(g.weightPct - limits.singleNamePct) }); });
+  bySector.groups.forEach((g) => { if (g.weightPct > limits.sectorPct) limitBreaches.push({ type: 'Sector', name: g.name, weightPct: g.weightPct, limitPct: limits.sectorPct, breachPct: round2(g.weightPct - limits.sectorPct) }); });
+
+  // Liquidation plan: split each position's target-exit shares evenly across the horizon subject
+  // to the max-participation constraint, reporting total impact cost of the plan (a genuine, if
+  // simplified, evenly-paced schedule rather than a fully impact-optimised solver).
+  const liquidationPlan = liqTable.map((r) => {
+    const daysNeeded = Math.max(1, Math.ceil(r.daysToLiquidate));
+    const feasibleWithinHorizon = daysNeeded <= liquidationHorizonDays;
+    return { id: r.id, daysNeeded, feasibleWithinHorizon, dailySellPct: round2(100 / daysNeeded), estimatedImpactCost: r.impactCostAmount };
+  });
+  const totalLiquidationCost = round2(liquidationPlan.reduce((a, r) => a + r.estimatedImpactCost, 0));
+  const namesExceedingHorizon = liquidationPlan.filter((r) => !r.feasibleWithinHorizon).length;
+
+  const varOut = runVarCvar({ confidence: 0.95, horizonDays: 1 });
+  const parametricVarPct = varOut.var.parametric.pct;
+  const liquidityAddOnPct = round2((totalLiquidationCost / varOut.portfolio.portfolioValue) * 100);
+  const liquidityAdjustedVarPct = round2(parametricVarPct + liquidityAddOnPct);
+
+  return {
+    liquidityProfile: liqTable,
+    concentration: {
+      byName: byName.groups.slice(0, 10), byNameHhi: byName.hhi, top5NamePct,
+      bySector: bySector.groups, bySectorHhi: bySector.hhi, top3SectorPct,
+      interpretation: byName.hhi > 1800 ? 'Highly concentrated (HHI > 1800)' : byName.hhi > 1000 ? 'Moderately concentrated' : 'Well diversified',
+    },
+    limitBreaches,
+    liquidationPlan: { horizonDays: liquidationHorizonDays, schedule: liquidationPlan, totalImpactCost: totalLiquidationCost, namesExceedingHorizon },
+    liquidityStress: { volumeHaircutPct: round2(stressVolumeHaircut * 100), avgDaysToLiquidateBase: avgDaysBase, avgDaysToLiquidateStressed: avgDaysStressed, daysIncreaseFactor: daysIncreaseFactorExact, note: avgDaysBase < 0.01 ? 'This book is small relative to institutional ADV, so absolute days-to-liquidate round to ~0 even under stress; the multiplier above is the deterministic haircut effect, not an empirical average.' : null },
+    liquidityAdjustedVar: liquidityAdjustedVarPct,
+    varComponents: { parametricVarPct, liquidityAddOnPct },
+    limits,
+    modelNote: 'Bid-ask spreads are an illustrative macap-based assumption (no licensed market-depth feed); market impact uses a standard square-root-law approximation on each position\'s own trailing volatility and ADV, which are computed from genuine historical volume data.',
+  };
+}
+
+
+
+  
+  // ============================== Module 6 samples + exports ==============================
+  const M6_SAMPLES = {
+    m6uc1: { confidence: 0.95, horizonDays: 1, shrinkage: 0.2, mcPaths: 3000, tDegreesOfFreedom: 5, evtThresholdPercentile: 0.90, whatIf: { stockId: 'MARUTI', tradeValue: -50000 } },
+    m6uc2: { sectorNeutral: true, unintendedThreshold: 0.5 },
+    m6uc3: { reverseStressThresholdPct: 0.15 },
+    m6uc4: { horizonsDays: [1, 5, 21], simPaths: 800, impliedAnchorWeight: 0.25 },
+    m6uc5: { horizonDays: 60, mddThresholdPct: -15, riskTargetVolPct: 7, simPaths: 4000 },
+    m6uc6: { maxParticipationRate: 0.15, stressVolumeHaircut: 0.5, liquidationHorizonDays: 5, limits: { singleNamePct: 10, sectorPct: 25, issuerPct: 15 } },
+  };
+
   global.WISModels = {
     uc1: { run: runGoalAllocation, sample: SAMPLES.uc1 },
     uc2: { run: runMonteCarlo, sample: SAMPLES.uc2 },
@@ -4016,6 +5242,12 @@ function runSentimentSignal(payload) {
     m5uc10: { run: runRegimeDetection, sample: M5_SAMPLES.m5uc10 },
     m5uc11: { run: runEarningsSurprise, sample: M5_SAMPLES.m5uc11 },
     m5uc12: { run: runSentimentSignal, sample: M5_SAMPLES.m5uc12 },
+    m6uc1: { run: runVarCvar, sample: M6_SAMPLES.m6uc1 },
+    m6uc2: { run: runFactorRisk, sample: M6_SAMPLES.m6uc2 },
+    m6uc3: { run: runStressTesting, sample: M6_SAMPLES.m6uc3 },
+    m6uc4: { run: runVolatilityForecast, sample: M6_SAMPLES.m6uc4 },
+    m6uc5: { run: runDrawdownHedging, sample: M6_SAMPLES.m6uc5 },
+    m6uc6: { run: runLiquidityConcentration, sample: M6_SAMPLES.m6uc6 },
   };
   global.WISRealHoldings = REAL_HOLDINGS;
   global.WISStockUniverse = STOCK_UNIVERSE;

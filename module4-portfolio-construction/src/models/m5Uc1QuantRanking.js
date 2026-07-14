@@ -124,4 +124,4 @@ function runQuantRanking(payload) {
   return { weights, weightSum, sectorNeutral, universe: scored, backtestStats, decileCount: 10 };
 }
 
-module.exports = { runQuantRanking, DEFAULT_FACTOR_WEIGHTS, FACTOR_KEYS };
+module.exports = { runQuantRanking, DEFAULT_FACTOR_WEIGHTS, FACTOR_KEYS, computeFactorTable };
